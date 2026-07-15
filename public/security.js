@@ -9,6 +9,13 @@
     return `"${text.replace(/"/g, '""')}"`;
   }
 
+  function markdownCell(value) {
+    return String(value == null ? '' : value)
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|')
+      .replace(/[\r\n]+/g, ' ');
+  }
+
   function isAllowedHost(hostHeader) {
     const hostname = String(hostHeader || '').replace(/^\[|\]$/g, '').split(':')[0].toLowerCase();
     return hostname === '127.0.0.1' || hostname === 'localhost';
@@ -27,5 +34,5 @@
     }
   }
 
-  return { csvCell, isAllowedHost, isTrustedMutationRequest };
+  return { csvCell, markdownCell, isAllowedHost, isTrustedMutationRequest };
 }));

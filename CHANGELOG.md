@@ -13,4 +13,7 @@ All notable changes to this project are documented here.
 - Enforced loopback Host and same-origin checks for browser-initiated state changes.
 - Limited aggregate multipart upload buffering to 20 MB per request.
 - Neutralized spreadsheet formula prefixes in CSV exports.
+- Rejected reserved object keys to prevent prototype pollution.
+- Added global and upload-specific rate limiting.
+- Completed Markdown export escaping for backslashes, pipes, and line breaks.
 - Added focused security regression tests.

@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Busboy = require('busboy');
+const { rateLimit } = require('express-rate-limit');
 const { isTrustedMutationRequest } = require('./public/security');
 
 // Lightweight .env loader (dependency-free). Loads the local optional config into process.env
@@ -106,6 +107,9 @@ app.use((req, res, next) => {
   }
   next();
 });
+const generalRateLimit = rateLimit({ windowMs: 60 * 1000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false });
+const uploadRateLimit = rateLimit({ windowMs: 60 * 1000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false });
+app.use(generalRateLimit);
 app.use(express.json({ limit: '1mb' }));
 app.use('/static', express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(path.join(dataDir, 'uploads'), {
@@ -137,6 +141,15 @@ function writeData(data) {
 
 function sanitizeName(name) {
   return name.replace(/[\/\\?%*:|"<>]/g, '').trim();
+}
+
+function isSafeObjectKey(value) {
+  return !['__proto__', 'prototype', 'constructor'].includes(String(value || '').toLowerCase());
+}
+
+function getProject(data, name) {
+  if (!isSafeObjectKey(name) || !data.projects || !Object.hasOwn(data.projects, name)) return null;
+  return data.projects[name];
 }
 
 // Remove an uploaded transcript's file from disk (basename guards against path traversal).
@@ -800,7 +813,7 @@ app.post('/api/projects', (req, res) => {
   }
 
   const projectName = sanitizeName(name);
-  if (!projectName) {
+  if (!projectName || !isSafeObjectKey(projectName)) {
     return res.status(400).json({ error: 'Invalid project name' });
   }
   if (projectName.length > 120) {
@@ -811,19 +824,20 @@ app.post('/api/projects', (req, res) => {
   if (!data.projects) {
     data.projects = {};
   }
-  if (data.projects[projectName]) {
+  if (getProject(data, projectName)) {
     return res.status(409).json({ error: 'Project already exists' });
   }
 
-  data.projects[projectName] = {
+  const projectData = {
     description: description || '',
     stories: [],
     timeline: [],
     transcripts: []
   };
+  Object.defineProperty(data.projects, projectName, { value: projectData, enumerable: true, configurable: true, writable: true });
   writeData(data);
 
-  res.json({ name: projectName, project: data.projects[projectName] });
+  res.json({ name: projectName, project: projectData });
 });
 
 app.put('/api/project', (req, res) => {
@@ -832,7 +846,7 @@ app.put('/api/project', (req, res) => {
     return res.status(400).json({ error: 'Missing project name' });
   }
   const data = readData();
-  const projectData = data.projects && data.projects[name];
+  const projectData = getProject(data, name);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -847,11 +861,12 @@ app.delete('/api/project', (req, res) => {
     return res.status(400).json({ error: 'Missing project name' });
   }
   const data = readData();
-  if (!data.projects || !data.projects[name]) {
+  const projectData = getProject(data, name);
+  if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
   // Clean up uploaded transcript files before dropping the project.
-  (data.projects[name].transcripts || []).forEach(deleteTranscriptFile);
+  (projectData.transcripts || []).forEach(deleteTranscriptFile);
   delete data.projects[name];
   writeData(data);
   res.json({ success: true });
@@ -864,7 +879,7 @@ app.get('/api/project', (req, res) => {
   }
 
   const data = readData();
-  const project = data.projects && data.projects[name];
+  const project = getProject(data, name);
   if (!project) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -938,7 +953,7 @@ app.post('/api/project/status-report', wrap(async (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -982,7 +997,7 @@ app.post('/api/project/story', (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1026,7 +1041,7 @@ app.post('/api/project/story/import/preview', wrap(async (req, res) => {
   if (!project || !file) return res.status(400).json({ error: 'Choose a CSV file and project' });
   if (!/\.csv$/i.test(file.originalname || '')) return res.status(400).json({ error: 'Only .csv files can be imported' });
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) return res.status(404).json({ error: 'Project not found' });
   try {
     const preview = mapCsvWorkItems(file.buffer.toString('utf8'), projectData);
@@ -1041,7 +1056,7 @@ app.post('/api/project/story/import', (req, res) => {
   if (!project || !Array.isArray(items)) return res.status(400).json({ error: 'Missing project or imported work items' });
   if (items.length > 1000) return res.status(400).json({ error: 'Import is limited to 1,000 work items at a time' });
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) return res.status(404).json({ error: 'Project not found' });
 
   const existingJiraIds = new Set((projectData.stories || []).map(story => normalizeText(story.jiraId)).filter(Boolean));
@@ -1093,7 +1108,7 @@ app.put('/api/project/assignee-directory', (req, res) => {
   const { project, entries, applyExisting } = req.body;
   if (!project || !Array.isArray(entries)) return res.status(400).json({ error: 'Missing project or assignee directory entries' });
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) return res.status(404).json({ error: 'Project not found' });
 
   const directory = {};
@@ -1124,7 +1139,7 @@ app.put('/api/project/status-mappings', (req, res) => {
   const { project, entries, applyExisting } = req.body;
   if (!project || !Array.isArray(entries)) return res.status(400).json({ error: 'Missing project or status mappings' });
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) return res.status(404).json({ error: 'Project not found' });
 
   const mappings = {};
@@ -1160,7 +1175,7 @@ app.post('/api/project/timeline', (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1185,7 +1200,7 @@ app.put('/api/project/story/link', (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1213,7 +1228,7 @@ app.put('/api/project/story', (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1278,7 +1293,7 @@ app.put('/api/project/timeline', (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1303,7 +1318,7 @@ app.put('/api/project/transcript', (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1328,7 +1343,7 @@ app.delete('/api/project/story', (req, res) => {
     return res.status(400).json({ error: 'Missing project or story id' });
   }
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1344,7 +1359,7 @@ app.delete('/api/project/timeline', (req, res) => {
     return res.status(400).json({ error: 'Missing project or timeline id' });
   }
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1363,7 +1378,7 @@ app.delete('/api/project/transcript', (req, res) => {
     return res.status(400).json({ error: 'Missing project or transcript id' });
   }
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1386,7 +1401,7 @@ app.delete('/api/project/story/update', (req, res) => {
     return res.status(400).json({ error: 'Missing project, storyId, or updateId' });
   }
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1399,7 +1414,7 @@ app.delete('/api/project/story/update', (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/project/transcript', wrap(async (req, res) => {
+app.post('/api/project/transcript', uploadRateLimit, wrap(async (req, res) => {
   const { fields, files: uploadedFiles } = await parseMultipart(req, { maxFiles: 5, allowedFields: ['project', 'notes', 'date', 'metadata', 'type', 'title'] });
   const project = fields.project;
   const notes = fields.notes || '';
@@ -1410,7 +1425,7 @@ app.post('/api/project/transcript', wrap(async (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
@@ -1516,7 +1531,7 @@ app.post('/api/project/teams-update', wrap(async (req, res) => {
   }
 
   const data = readData();
-  const projectData = data.projects && data.projects[project];
+  const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }

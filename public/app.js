@@ -2873,7 +2873,7 @@ function exportManageMarkdown() {
 }
 
 function escapeMarkdown(text) {
-  return String(text || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+  return PMSecurity.markdownCell(text);
 }
 
 

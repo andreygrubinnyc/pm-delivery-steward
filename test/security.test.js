@@ -1,12 +1,16 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { csvCell, isTrustedMutationRequest } = require('../public/security');
+const { csvCell, markdownCell, isTrustedMutationRequest } = require('../public/security');
 
 test('CSV cells neutralize spreadsheet formula prefixes', () => {
   assert.equal(csvCell('=1+1'), "\"'=1+1\"");
   assert.equal(csvCell('  @SUM(A1:A2)'), "\"'  @SUM(A1:A2)\"");
   assert.equal(csvCell('ordinary value'), '"ordinary value"');
   assert.equal(csvCell('a"b'), '"a""b"');
+});
+
+test('Markdown table cells escape backslashes, pipes, and line breaks', () => {
+  assert.equal(markdownCell('a\\|b\r\nc'), 'a\\\\\\|b c');
 });
 
 test('same-origin browser mutations and local non-browser clients remain allowed', () => {
