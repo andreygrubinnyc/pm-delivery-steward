@@ -56,14 +56,21 @@ test('future comment timestamps cannot suppress stale-comment warnings', () => {
 });
 
 test('date-only values stay on their local calendar day', () => {
-  const evening = new Date('2026-07-15T02:00:00.000Z');
-  assert.equal(localDateKey(evening), '2026-07-14');
-  assert.equal(calendarDayDelta('2026-07-14', '2026-07-14'), 0);
-  assert.equal(calendarDayDelta('2026-07-15', '2026-07-14'), 1);
-  const local = parseLocalDateOnly('2026-07-14');
-  assert.equal(local.getFullYear(), 2026);
-  assert.equal(local.getMonth(), 6);
-  assert.equal(local.getDate(), 14);
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = 'America/Los_Angeles';
+  try {
+    const evening = new Date('2026-07-15T02:00:00.000Z');
+    assert.equal(localDateKey(evening), '2026-07-14');
+    assert.equal(calendarDayDelta('2026-07-14', '2026-07-14'), 0);
+    assert.equal(calendarDayDelta('2026-07-15', '2026-07-14'), 1);
+    const local = parseLocalDateOnly('2026-07-14');
+    assert.equal(local.getFullYear(), 2026);
+    assert.equal(local.getMonth(), 6);
+    assert.equal(local.getDate(), 14);
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
 });
 
 test('Markdown export neutralizes raw HTML and transcript links stay in the upload directory', () => {
