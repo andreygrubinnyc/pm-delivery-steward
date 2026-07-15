@@ -1963,7 +1963,7 @@ function exportTrackingCSV() {
   const header = ['Project', 'Jira', 'Summary', 'Status', 'Assignee', 'Sprint', 'Contacted?', 'Comment Added?', 'Comment Date', 'Needs Comment?', 'Last Comment'];
   const rows = items.map(({ project, story: s }) => [project, s.jiraId, s.summary, inferStatusClient(s), storyAssignee(s), storySprint(s), s.contacted ? 'Yes' : 'No', s.commentAdded ? 'Yes' : 'No', lastCommentLabel(s), itemNeedsComment(s) ? 'Yes' : 'No', storyLastCommentText(s)]);
   const csv = [header].concat(rows)
-    .map(r => r.map(v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`).join(','))
+    .map(r => r.map(PMSecurity.csvCell).join(','))
     .join('\n');
   downloadFile('tracking-all-projects.csv', csv, 'text/csv');
 }
@@ -2850,7 +2850,7 @@ function exportManageCSV() {
   const rows = buildExportRows(items);
   const header = Object.keys(rows[0]).join(',');
   const csv = [header].concat(rows.map(row => {
-    return Object.values(row).map(value => `"${String(value || '').replace(/"/g, '""')}"`).join(',');
+    return Object.values(row).map(PMSecurity.csvCell).join(',');
   })).join('\n');
 
   downloadFile('pilot-manage-export.csv', csv, 'text/csv');

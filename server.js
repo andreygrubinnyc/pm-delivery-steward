@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Busboy = require('busboy');
+const { isTrustedMutationRequest } = require('./public/security');
 
 // Lightweight .env loader (dependency-free). Loads the local optional config into process.env
 // without overriding variables already set in the real environment.
@@ -42,12 +43,14 @@ fs.mkdirSync(transcriptsDir, { recursive: true });
 
 const allowedUploadExtensions = new Set(['.txt', '.md', '.csv', '.json', '.log', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.png', '.jpg', '.jpeg']);
 const maxUploadSize = 10 * 1024 * 1024;
+const maxUploadRequestSize = 20 * 1024 * 1024;
 
 function parseMultipart(req, { maxFiles = 5, allowedFields = [] } = {}) {
   return new Promise((resolve, reject) => {
     const fields = {};
     const files = [];
     let failure = null;
+    let receivedBytes = 0;
     let parser;
     try {
       parser = Busboy({ headers: req.headers, limits: { files: maxFiles, fileSize: maxUploadSize, fields: 30, fieldSize: 1024 * 1024 } });
@@ -60,7 +63,11 @@ function parseMultipart(req, { maxFiles = 5, allowedFields = [] } = {}) {
       const extension = path.extname(info.filename || '').toLowerCase();
       const chunks = [];
       if (!allowedUploadExtensions.has(extension)) failure = new Error('This file type is not supported.');
-      stream.on('data', chunk => { if (!failure) chunks.push(chunk); });
+      stream.on('data', chunk => {
+        receivedBytes += chunk.length;
+        if (receivedBytes > maxUploadRequestSize) failure = new Error('Uploads are limited to 20 MB per request.');
+        if (!failure) chunks.push(chunk);
+      });
       stream.on('limit', () => { failure = new Error('Each uploaded file must be 10 MB or smaller.'); });
       stream.on('end', () => {
         if (!failure) files.push({ fieldname, originalname: info.filename, mimetype: info.mimeType, buffer: Buffer.concat(chunks) });
@@ -86,6 +93,17 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
+  next();
+});
+app.use((req, res, next) => {
+  if (!isTrustedMutationRequest({
+    method: req.method,
+    host: req.headers.host,
+    origin: req.headers.origin,
+    fetchSite: req.headers['sec-fetch-site']
+  })) {
+    return res.status(403).json({ error: 'Request origin is not allowed.' });
+  }
   next();
 });
 app.use(express.json({ limit: '1mb' }));
@@ -1548,7 +1566,7 @@ app.post('/api/project/teams-update', wrap(async (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Request error:', err && err.message);
   if (res.headersSent) return next(err);
-  if (/file type|multipart|uploaded file|upload up to/i.test(err && err.message)) return res.status(400).json({ error: err.message });
+  if (/file type|multipart|uploaded file|upload up to|uploads are limited/i.test(err && err.message)) return res.status(400).json({ error: err.message });
   res.status(500).json({ error: 'The request could not be completed. Check the local server log for details.' });
 });
 

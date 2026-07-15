@@ -10,3 +10,7 @@ All notable changes to this project are documented here.
 - Kept DSU evidence extraction deterministic.
 - Added release documentation, security guidance, CI, and repository hygiene controls.
 - Hardened upload handling, response headers, error responses, and copy controls.
+- Enforced loopback Host and same-origin checks for browser-initiated state changes.
+- Limited aggregate multipart upload buffering to 20 MB per request.
+- Neutralized spreadsheet formula prefixes in CSV exports.
+- Added focused security regression tests.

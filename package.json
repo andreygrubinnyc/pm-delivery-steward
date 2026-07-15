@@ -10,8 +10,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/app.js",
-    "test": "npm run check",
+    "check": "node --check server.js && node --check public/security.js && node --check public/app.js",
+    "test": "npm run check && node --test",
     "audit": "npm audit --omit=dev"
   },
   "dependencies": {
