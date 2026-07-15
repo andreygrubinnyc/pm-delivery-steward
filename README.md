@@ -38,6 +38,8 @@ cp .env.example .env
 
 Add either an OpenAI or Anthropic API key to `.env`, then restart the app. Keys remain on your local server and are never sent to the browser. AI drafts must be reviewed before copying or sending.
 
+AI requests have a 45-second deadline by default (`AI_REQUEST_TIMEOUT_MS`, adjustable from 1 to 120 seconds). Anthropic keys are sent only to Anthropic's official Messages endpoint; custom provider URLs are not supported.
+
 ## Privacy and Security
 
 - Do not commit `.env`, `data/pilot-data.json`, or `data/uploads/`.

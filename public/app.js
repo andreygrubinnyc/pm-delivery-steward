@@ -89,6 +89,18 @@ let captureFocus = '';
 let captureSelectedFiles = [];
 let captureUploadFeedback = null;
 
+async function saveRequest(url, options) {
+  try {
+    const response = await fetch(url, options);
+    if (response.ok) return response;
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed (${response.status}).`);
+  } catch (error) {
+    alert(error.message || 'Your changes could not be saved.');
+    return null;
+  }
+}
+
 const ASSIGNEE_DIRECTORY_STARTER = {
   arivera: 'Alex Rivera',
   jchen: 'Jamie Chen',
@@ -438,7 +450,8 @@ function manageToggleNewProjectForm() {
 
 async function deleteUpdate(project, storyId, updateId) {
   if (!confirm('Delete this extracted update?')) return;
-  await fetch(`/api/project/story/update?project=${encodeURIComponent(project)}&storyId=${encodeURIComponent(storyId)}&updateId=${encodeURIComponent(updateId)}`, { method: 'DELETE' });
+  const response = await saveRequest(`/api/project/story/update?project=${encodeURIComponent(project)}&storyId=${encodeURIComponent(storyId)}&updateId=${encodeURIComponent(updateId)}`, { method: 'DELETE' });
+  if (!response) return;
   await refreshProject();
 }
 
@@ -1000,11 +1013,12 @@ function cancelEditProjectDesc() {
 async function saveProjectDesc() {
   const el = document.getElementById('edit-project-desc');
   const description = el ? el.value : '';
-  await fetch('/api/project', {
+  const response = await saveRequest('/api/project', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: selectedProject, description })
   });
+  if (!response) return;
   editingProjectDesc = false;
   await refreshProject();
 }
@@ -1861,7 +1875,7 @@ async function createTrackedItem() {
   const tf = readTrackingFields('new-item'); // jiraId, owner, contacted, commentAdded, lastUpdate
   if (!project) { alert('Pick a project.'); return; }
   if (!title && !tf.jiraId) { alert('Enter at least a title or a Jira id.'); return; }
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -1873,6 +1887,7 @@ async function createTrackedItem() {
       ...tf
     })
   });
+  if (!response) return;
   trackingShowAddForm = false;
   await refreshProject();
 }
@@ -1880,37 +1895,41 @@ async function createTrackedItem() {
 async function trackExistingStory(value) {
   let project, id;
   try { [project, id] = JSON.parse(value); } catch (_) { return; }
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project, id, tracked: true })
   });
+  if (!response) return;
   await refreshProject();
 }
 
 async function untrackItem(project, id) {
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project, id, tracked: false })
   });
+  if (!response) return;
   await refreshProject();
 }
 
 // Text-field edits: update in-memory + PUT, no re-render (keeps typing focus).
 async function updateItemField(project, id, field, value) {
-  const p = projects[project];
-  if (p) { const s = (p.stories || []).find(x => x.id === id); if (s) s[field] = value; }
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project, id, [field]: value })
   });
+  if (!response) return;
+  const p = projects[project];
+  if (p) { const s = (p.stories || []).find(x => x.id === id); if (s) s[field] = value; }
 }
 
 // Checkbox flags (contacted / commentAdded): PUT then refresh so highlights recompute.
 async function setItemFlag(project, id, field, checked) {
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project, id, [field]: checked })
   });
+  if (!response) return;
   await refreshProject();
 }
 
@@ -1926,10 +1945,11 @@ async function updateItemLastComment(project, id, el) {
 
 // "✓ today" — record a comment now (server stamps lastCommentedAt, sets commentAdded).
 async function logItemComment(project, id) {
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project, id, logComment: true })
   });
+  if (!response) return;
   await refreshProject();
 }
 
@@ -2414,11 +2434,12 @@ function cancelTranscriptEdit() {
 }
 async function saveTranscriptEdit(id) {
   const val = i => { const el = document.getElementById(i); return el ? el.value : undefined; };
-  await fetch('/api/project/transcript', {
+  const response = await saveRequest('/api/project/transcript', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project: selectedProject, id, title: val('edit-transcript-title'), type: val('edit-transcript-type'), date: val('edit-transcript-date'), notes: val('edit-transcript-notes') })
   });
+  if (!response) return;
   transcriptEditing = null;
   await refreshProject();
 }
@@ -2807,11 +2828,12 @@ async function saveManageEdit(project, type, id) {
     if (type === 'Ticket') payload.status = manageEditData.meta;
   }
 
-  await fetch(`/api/project/${type.toLowerCase()}`, {
+  const response = await saveRequest(`/api/project/${type.toLowerCase()}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
+  if (!response) return;
 
   manageEditing = null;
   manageEditData = {};
@@ -2881,9 +2903,10 @@ async function deleteItem(project, type, itemId) {
   const confirmed = confirm(`Delete ${type} for project ${project}?`);
   if (!confirmed) return;
 
-  await fetch(`/api/project/${type}?project=${encodeURIComponent(project)}&id=${encodeURIComponent(itemId)}`, {
+  const response = await saveRequest(`/api/project/${type}?project=${encodeURIComponent(project)}&id=${encodeURIComponent(itemId)}`, {
     method: 'DELETE'
   });
+  if (!response) return;
 
   await refreshProject();
 }
@@ -3427,10 +3450,11 @@ function toggleTrackingExpanded(project, id) {
 
 // Flip a story's "tracked" flag — adds/removes it from the cross-project Tracking view.
 async function toggleStoryTracked(project, id, tracked) {
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project, id, tracked: !!tracked })
   });
+  if (!response) return;
   await refreshProject();
 }
 
@@ -3499,11 +3523,12 @@ async function saveStoryEdit(id) {
     timelineId: val('edit-story-timeline'),
     ...readTrackingFields('edit-story')
   };
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   });
+  if (!response) return;
   storyEditing = null;
   await refreshProject();
 }
@@ -3522,7 +3547,7 @@ async function createStory() {
     return;
   }
 
-  await fetch('/api/project/story', {
+  const response = await saveRequest('/api/project/story', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3538,6 +3563,7 @@ async function createStory() {
       ...readTrackingFields('story')
     })
   });
+  if (!response) return;
 
   storyShowAddForm = false;
   await refreshProject();
@@ -3555,7 +3581,7 @@ async function createTimeline() {
     return;
   }
 
-  await fetch('/api/project/timeline', {
+  const response = await saveRequest('/api/project/timeline', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3566,6 +3592,7 @@ async function createTimeline() {
       notes
     })
   });
+  if (!response) return;
 
   await fetchProjects();
   if (project !== selectedProject) {
@@ -3673,11 +3700,12 @@ async function submitLinkStory(timelineId) {
     return;
   }
 
-  await fetch('/api/project/story/link', {
+  const response = await saveRequest('/api/project/story/link', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project: selectedProject, storyId, timelineId })
   });
+  if (!response) return;
 
   await refreshProject();
 }
