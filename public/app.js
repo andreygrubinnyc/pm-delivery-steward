@@ -51,7 +51,7 @@ let trackingGroupByOwner = false;
 let trackingCommentBannerDismissed = false;
 let trackingShowAddForm = false;
 let trackingProjectFilter = 'all';
-let aiPrompts = { dsuExtraction: '', statusReport: '' };
+let aiPrompts = { statusReport: '' };
 let aiPromptStatus = '';
 let settings = { commentStaleDays: 7, sprintOptions: [] };
 let projectStatusReport = '';
@@ -59,6 +59,7 @@ let projectStatusSource = '';
 let statusReportLoading = false;
 let statusReportLoadingMode = '';
 let statusReportError = '';
+let statusReportWarning = '';
 let teamsSelectedStories = new Set();
 let teamsRecipient = '';
 let teamsSubject = '';
@@ -67,6 +68,7 @@ let teamsSource = '';
 let teamsLoading = false;
 let teamsLoadingMode = '';
 let teamsError = '';
+let teamsWarning = '';
 let teamsAssigneeFilter = 'all';
 let teamsStatusFilter = 'all';
 let teamsSprintFilter = 'all';
@@ -182,7 +184,7 @@ async function fetchAiPrompts() {
     aiPrompts = await response.json();
   } catch (error) {
     console.warn('Failed to fetch AI prompts:', error.message);
-    aiPrompts = { dsuExtraction: '', statusReport: '' };
+    aiPrompts = { statusReport: '' };
   }
 }
 
@@ -202,19 +204,15 @@ async function saveAiPrompts() {
   if (!statusTextarea) return;
 
   const statusPromptText = statusTextarea.value;
-  const response = await fetch('/api/ai/prompts', {
+  const response = await saveRequest('/api/ai/prompts', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ statusReport: statusPromptText })
   });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unable to save prompts' }));
-    aiPromptStatus = `Failed to save prompts: ${error.error || 'Unknown error'}`;
-  } else {
-    aiPrompts = await response.json();
-    aiPromptStatus = 'Prompts saved successfully.';
-  }
+  if (!response) return;
+  aiPrompts = await response.json();
+  aiPromptStatus = 'Prompts saved successfully.';
   managePanel.innerHTML = renderManagePanel();
 }
 
@@ -224,16 +222,12 @@ async function saveWorkspaceSettings() {
   if (!staleEl || !sprintEl) return;
   const commentStaleDays = parseInt(staleEl.value, 10);
   const sprintOptions = sprintEl.value.split('\n').map(value => value.trim()).filter(Boolean);
-  const response = await fetch('/api/settings', {
+  const response = await saveRequest('/api/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ commentStaleDays, sprintOptions })
   });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unable to save workspace settings' }));
-    alert(error.error || 'Unable to save workspace settings');
-    return;
-  }
+  if (!response) return;
   settings = await response.json();
   renderPanels();
 }
@@ -252,13 +246,13 @@ async function saveAssigneeDirectory() {
     entries.push({ alias: value.slice(0, separator).trim(), name: value.slice(separator + 1).trim() });
   });
   if (invalid.length) { alert(`Use one alias = Full Name entry per line. Check line${invalid.length === 1 ? '' : 's'} ${invalid.join(', ')}.`); return; }
-  const response = await fetch('/api/project/assignee-directory', {
+  const response = await saveRequest('/api/project/assignee-directory', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project: selectedProject, entries, applyExisting: true })
   });
-  const result = await response.json().catch(() => ({ error: 'Unable to save assignee directory' }));
-  if (!response.ok) { alert(result.error || 'Unable to save assignee directory'); return; }
+  if (!response) return;
+  const result = await response.json();
   await refreshProject();
   alert(`Assignee directory saved. ${result.updated} existing work item${result.updated === 1 ? '' : 's'} updated.`);
 }
@@ -283,13 +277,13 @@ async function saveProjectStatusMappings() {
     alert(`Use Jira Status = one of: Blocked, In progress, Active, Planned, Done, Not started. Check line${invalid.length === 1 ? '' : 's'} ${invalid.join(', ')}.`);
     return;
   }
-  const response = await fetch('/api/project/status-mappings', {
+  const response = await saveRequest('/api/project/status-mappings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ project: selectedProject, entries, applyExisting: true })
   });
-  const result = await response.json().catch(() => ({ error: 'Unable to save status mappings' }));
-  if (!response.ok) { alert(result.error || 'Unable to save status mappings'); return; }
+  if (!response) return;
+  const result = await response.json();
   await refreshProject();
   alert(`Status mappings saved. ${result.updated} existing work item${result.updated === 1 ? '' : 's'} updated.`);
 }
@@ -306,6 +300,7 @@ async function generateStatusReport(mode = 'heuristic') {
   projectStatusReport = '';
   projectStatusSource = '';
   statusReportError = '';
+  statusReportWarning = '';
   reportsPanel.innerHTML = renderReportsPanel();
 
   try {
@@ -321,6 +316,7 @@ async function generateStatusReport(mode = 'heuristic') {
     const result = await response.json();
     projectStatusReport = result.report || '';
     projectStatusSource = result.source || 'unknown';
+    statusReportWarning = result.warning || '';
   } catch (error) {
     statusReportError = error.message;
   } finally {
@@ -359,7 +355,7 @@ function renderProjectSelector() {
 function navBadgeCounts() {
   const counts = {};
   const quiet = allTrackedItems().filter(x => itemNeedsComment(x.story)).length;
-  if (quiet) counts.stories = quiet;
+  if (quiet) counts.tracking = quiet;
   return counts;
 }
 
@@ -409,30 +405,23 @@ async function addProject() {
   const descEl = document.getElementById('new-project-description');
   const description = descEl ? descEl.value.trim() : '';
 
-  const response = await fetch('/api/projects', {
+  const response = await saveRequest('/api/projects', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, description })
   });
 
-  if (!response.ok) {
-    const error = await response.json();
-    alert(error.error || 'Unable to create project');
-    return;
-  }
-
+  if (!response) return;
+  const result = await response.json();
   showNewProjectForm = false;
-  selectedProject = name;
+  selectedProject = result.name;
   await fetchProjects();
 }
 
 async function deleteProject(name) {
   if (!confirm(`Delete project "${name}" and all its data (stories, timeline, transcripts)? This cannot be undone.`)) return;
-  const response = await fetch(`/api/project?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
-  if (!response.ok) {
-    alert('Unable to delete project.');
-    return;
-  }
+  const response = await saveRequest(`/api/project?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!response) return;
   if (selectedProject === name) selectedProject = null;
   await refreshProject();
 }
@@ -457,7 +446,7 @@ async function deleteUpdate(project, storyId, updateId) {
 
 function renderMilestonesPanel(project) {
   const milestones = (project.timeline || []).slice().sort((a, b) => {
-    return milestoneHealth(b).score - milestoneHealth(a).score || new Date(a.date || '9999-12-31') - new Date(b.date || '9999-12-31');
+    return milestoneHealth(b).score - milestoneHealth(a).score || dateSortValue(a.date || '9999-12-31') - dateSortValue(b.date || '9999-12-31');
   });
   const overdue = milestones.filter(m => milestoneHealth(m).label === 'Overdue').length;
   const dueSoon = milestones.filter(m => milestoneHealth(m).label === 'Due soon').length;
@@ -656,7 +645,7 @@ function renderHelpPanel(needsProject) {
     <div class="help-grid">
       <section class="card help-section">
         <div class="section-heading"><h4>AI and review</h4><span class="micro">optional assistance</span></div>
-        <p><strong>${escapeHtml(aiMode)}.</strong> AI is used only for DSU extraction, status-summary drafting, and Teams drafting. If an AI call is unavailable, the app uses a heuristic or template fallback.</p>
+        <p><strong>${escapeHtml(aiMode)}.</strong> DSU extraction is deterministic. Optional AI is limited to selecting exact saved-source excerpts for status summaries and Teams messages; unverifiable output uses deterministic fallback.</p>
         <p>Always review generated text and the source badge before copying it. AI never silently changes a Jira work item, sends a Teams message, or becomes the source of truth.</p>
       </section>
       <section class="card help-section">
@@ -690,7 +679,8 @@ function getManageItems() {
           id: story.id,
           title: story.summary,
           details: story.description || story.notes || '',
-          meta: story.labels && story.labels.length ? story.labels.join(', ') : 'No labels',
+          detailsField: story.description ? 'description' : 'notes',
+          meta: story.labels && story.labels.length ? story.labels.join(', ') : '',
           linked: story.timelineId ? (project.timeline.find(t => t.id === story.timelineId) || { title: 'Unknown' }).title : '',
           date: story.createdAt || '',
           raw: story
@@ -706,7 +696,7 @@ function getManageItems() {
           id: entry.id,
           title: entry.title,
           details: entry.notes || '',
-          meta: entry.status || 'No status',
+          meta: entry.status || 'Planned',
           linked: project.stories.filter(s => s.timelineId === entry.id).map(s => s.summary).join(', '),
           date: entry.date || '',
           raw: entry
@@ -722,9 +712,10 @@ function getManageItems() {
           id: transcript.id,
           title: transcript.title,
           details: transcript.notes || '',
-          meta: transcript.type || 'No type',
+          meta: transcript.type || 'Notes',
           linked: '',
-          date: transcript.date || transcript.uploadedAt || '',
+          file: PMSecurity.safeTranscriptUrl(transcript.file),
+          date: transcript.date || (transcript.uploadedAt ? PMSecurity.localDateKey(new Date(transcript.uploadedAt)) : ''),
           raw: transcript
         });
       });
@@ -748,8 +739,8 @@ function getManageItems() {
   const direction = manageSortDirection === 'asc' ? 1 : -1;
   filtered.sort((a, b) => {
     if (manageSortKey === 'date') {
-      const aDate = a.date ? new Date(a.date).getTime() : 0;
-      const bDate = b.date ? new Date(b.date).getTime() : 0;
+      const aDate = dateSortValue(a.date);
+      const bDate = dateSortValue(b.date);
       return (aDate - bDate) * direction;
     }
     if (manageSortKey === 'type') {
@@ -764,14 +755,10 @@ function getManageItems() {
   return filtered;
 }
 
-// Client-side mirror of the server's inferStoryStatus (kept in sync with server.js).
+// Client-side mirror of the server's inferStoryStatus using the shared exact matcher.
 function inferStatusClient(story) {
-  const labels = Array.isArray(story.labels) ? story.labels.join(' ').toLowerCase() : String(story.labels || '').toLowerCase();
-  if (/(done|complete|completed)/.test(labels)) return 'Done';
-  if (/(in progress|in-progress|ongoing)/.test(labels)) return 'In progress';
-  if (/(blocked|on hold)/.test(labels)) return 'Blocked';
-  if (labels.includes('active')) return 'Active';
-  if (/(planned|to do|todo|backlog)/.test(labels)) return 'Planned';
+  const recordedStatus = PMSecurity.operatingStatusFromLabels(story && story.labels);
+  if (recordedStatus) return recordedStatus;
   if (story.updates && story.updates.length) return 'Active';
   if (story.timelineId) return 'Planned';
   return 'Not started';
@@ -786,13 +773,24 @@ function storySprint(story) {
 }
 
 function storyLastCommentText(story) {
-  return String((story && (story.lastComment || story.lastUpdate)) || '').trim();
+  const value = String((story && (story.lastComment || story.lastUpdate)) || '').trim();
+  return /^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(value) ? '' : value;
 }
 
 function previewText(text, max = 120) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return '';
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function displayDate(value) {
+  const date = PMSecurity.parseLocalDateOnly(value) || new Date(value || '');
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
+}
+
+function dateSortValue(value) {
+  const date = PMSecurity.parseLocalDateOnly(value) || new Date(value || '');
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function sprintOptions() {
@@ -826,10 +824,7 @@ function itemIsClosed(story) { return inferStatusClient(story) === 'Done'; }
 
 // Whole days since an ISO timestamp; null/blank → null ("never").
 function daysSince(iso) {
-  if (!iso) return null;
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return null;
-  return Math.floor((Date.now() - then) / 86400000);
+  return PMSecurity.daysSinceIso(iso);
 }
 
 // A tracked item "needs follow-up" when open (not Done) and its owner hasn't been contacted.
@@ -862,17 +857,11 @@ function lastCommentLabel(t) {
 }
 
 function daysUntil(dateValue) {
-  if (!dateValue) return null;
-  const target = new Date(dateValue);
-  if (Number.isNaN(target.getTime())) return null;
-  const now = new Date();
-  target.setHours(0, 0, 0, 0);
-  now.setHours(0, 0, 0, 0);
-  return Math.round((target - now) / 86400000);
+  return PMSecurity.daysUntilDateOnly(dateValue);
 }
 
 function milestoneIsClosed(entry) {
-  return /done|complete|completed|closed/i.test(String(entry?.status || ''));
+  return PMSecurity.operatingStatusFromValue(entry && entry.status) === 'Done';
 }
 
 function milestoneHealth(entry) {
@@ -899,7 +888,7 @@ function latestStoryActivityTime(story) {
     story?.createdAt,
     story?.lastCommentedAt,
     ...(story?.updates || []).map(update => update.date)
-  ].map(value => new Date(value || 0).getTime()).filter(Number.isFinite);
+  ].map(dateSortValue).filter(Boolean);
   return candidates.length ? Math.max(...candidates) : null;
 }
 
@@ -1157,7 +1146,7 @@ function renderDashboard(project) {
 
   const updates = [];
   stories.forEach(s => (s.updates || []).forEach(u => updates.push({ story: s.summary, ...u })));
-  updates.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  updates.sort((a, b) => dateSortValue(b.date) - dateSortValue(a.date));
 
   const dsuCount = transcripts.filter(t => (t.type || '').toLowerCase() === 'dsu').length;
   const followupCount = tracked.filter(itemNeedsFollowup).length;
@@ -1179,7 +1168,7 @@ function renderDashboard(project) {
 
   const milestones = timeline
     .slice()
-    .sort((a, b) => milestoneHealth(b).score - milestoneHealth(a).score || new Date(a.date || '9999-12-31') - new Date(b.date || '9999-12-31'))
+    .sort((a, b) => milestoneHealth(b).score - milestoneHealth(a).score || dateSortValue(a.date || '9999-12-31') - dateSortValue(b.date || '9999-12-31'))
     .slice(0, 5);
 
   const recentHtml = updates.length ? updates.slice(0, 6).map((u, i) => {
@@ -1554,12 +1543,13 @@ function renderTeamsPanel(project) {
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;">
           <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
             <button class="button" onclick="generateTeamsUpdate('heuristic')" ${teamsLoading ? 'disabled' : ''}>${teamsLoading && teamsLoadingMode === 'heuristic' ? 'Generating grounded draft…' : 'Generate grounded draft'}</button>
-            <button class="button secondary" onclick="generateTeamsUpdate('ai')" ${teamsLoading || !aiProvider ? 'disabled' : ''}>${teamsLoading && teamsLoadingMode === 'ai' ? 'Creating AI draft…' : 'Create AI draft'}</button>
+            <button class="button secondary" onclick="generateTeamsUpdate('ai')" ${teamsLoading || !aiProvider ? 'disabled' : ''}>${teamsLoading && teamsLoadingMode === 'ai' ? 'Verifying AI evidence…' : 'Add AI-grounded evidence'}</button>
             ${teamsMessage ? `<span class="src-badge ${teamsSource.startsWith('ai') ? 'ai' : ''}">source: ${escapeHtml(teamsSource)}</span>` : ''}
           </div>
           ${teamsMessage ? `<button class="button secondary" onclick="copyTeamsMessage()">Copy</button>` : ''}
         </div>
         ${teamsError ? `<div class="card" style="background:var(--danger-bg);color:var(--danger);border-color:var(--danger-border);margin-bottom:14px;"><strong>Error:</strong> ${escapeHtml(teamsError)}</div>` : ''}
+        ${teamsWarning ? `<div class="note warn" style="margin-bottom:14px;"><strong>Grounding notice:</strong> ${escapeHtml(teamsWarning)}</div>` : ''}
         <div class="card">
           <div class="section-heading">
             <h4>Draft Preview</h4>
@@ -1626,6 +1616,7 @@ async function generateTeamsUpdate(mode = 'heuristic') {
   teamsLoading = true;
   teamsLoadingMode = mode;
   teamsError = '';
+  teamsWarning = '';
   teamsMessage = '';
   teamsPanel.innerHTML = renderTeamsPanel(projects[selectedProject]);
   try {
@@ -1647,6 +1638,7 @@ async function generateTeamsUpdate(mode = 'heuristic') {
     const result = await response.json();
     teamsMessage = result.message || '';
     teamsSource = result.source || '';
+    teamsWarning = result.warning || '';
   } catch (error) {
     teamsError = error.message;
   } finally {
@@ -1956,17 +1948,13 @@ async function logItemComment(project, id) {
 async function setCommentStaleDays(value) {
   const n = parseInt(value, 10);
   if (!Number.isFinite(n) || n < 1 || n > 365) { alert('Enter a number of days between 1 and 365.'); return; }
-  try {
-    const response = await fetch('/api/settings', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ commentStaleDays: n })
-    });
-    if (!response.ok) throw new Error('save failed');
-    settings = await response.json();
-  } catch (error) {
-    console.warn('Failed to save staleness threshold:', error.message);
-  }
+  const response = await saveRequest('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commentStaleDays: n })
+  });
+  if (!response) return;
+  settings = await response.json();
   trackingPanel.innerHTML = renderTrackingPanel();
   portfolioPanel.innerHTML = renderPortfolioPanel();
   renderNavBadges();
@@ -2037,13 +2025,13 @@ function renderReportsPanel() {
       ...update
     }));
   });
-  updates.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  updates.sort((a, b) => dateSortValue(b.date) - dateSortValue(a.date));
 
-  const latestEvidenceAt = [
+  const latestEvidenceValue = [
     ...updates.map(update => update.date).filter(Boolean),
     ...transcripts.map(item => item.date || item.uploadedAt).filter(Boolean)
-  ].map(value => new Date(value).getTime()).filter(Number.isFinite).sort((a, b) => b - a)[0];
-  const latestEvidenceLabel = latestEvidenceAt ? new Date(latestEvidenceAt).toLocaleDateString() : 'No dated evidence yet';
+  ].sort((a, b) => dateSortValue(b) - dateSortValue(a))[0];
+  const latestEvidenceLabel = latestEvidenceValue ? displayDate(latestEvidenceValue) : 'No dated evidence yet';
 
   const hasReport = !!projectStatusReport;
   const sourceBadge = hasReport ? `<span class="src-badge ${projectStatusSource.startsWith('ai') ? 'ai' : ''}">source: ${escapeHtml(projectStatusSource)}</span>` : '';
@@ -2133,7 +2121,7 @@ function renderReportsPanel() {
         </div>
         <div class="hero-actions">
           <button class="button" onclick="generateStatusReport('heuristic')" ${statusReportLoading ? 'disabled' : ''}>${statusReportLoading && statusReportLoadingMode === 'heuristic' ? 'Generating grounded summary…' : 'Generate grounded summary'}</button>
-          <button class="button secondary" onclick="generateStatusReport('ai')" ${statusReportLoading || !aiProvider ? 'disabled' : ''}>${statusReportLoading && statusReportLoadingMode === 'ai' ? 'Creating AI draft…' : 'Create AI draft'}</button>
+          <button class="button secondary" onclick="generateStatusReport('ai')" ${statusReportLoading || !aiProvider ? 'disabled' : ''}>${statusReportLoading && statusReportLoadingMode === 'ai' ? 'Verifying AI evidence…' : 'Add AI-grounded evidence'}</button>
           ${hasReport ? '<button class="button secondary" onclick="copyStatusReport()">Copy summary</button>' : ''}
           <button class="button secondary" onclick="openCapture()">Capture evidence</button>
           <button class="button secondary" onclick="openWorkItems()">Review work items</button>
@@ -2200,6 +2188,7 @@ function renderReportsPanel() {
       </div>
     </div>
     ${statusReportError ? `<div class="card" style="background:var(--danger-bg);color:var(--danger);border-color:var(--danger-border);margin-bottom:14px;"><strong>Error:</strong> ${escapeHtml(statusReportError)}</div>` : ''}
+    ${statusReportWarning ? `<div class="note warn" style="margin-bottom:14px;"><strong>Grounding notice:</strong> ${escapeHtml(statusReportWarning)}</div>` : ''}
     <div class="section-grid" style="margin-top:14px;">
       <div class="card">
         <div class="section-heading">
@@ -2232,13 +2221,11 @@ function renderTranscriptsPanel(project) {
   const transcriptCount = (project.transcripts || []).length;
   const dsuCount = (project.transcripts || []).filter(t => /dsu/i.test(t.type || '')).length;
   const extractedCount = (project.transcripts || []).reduce((sum, t) => sum + (Array.isArray(t.extractedUpdates) ? t.extractedUpdates.length : 0), 0);
-  const latestSourceAt = (project.transcripts || [])
+  const latestSourceValue = (project.transcripts || [])
     .map(t => t.date || t.uploadedAt)
     .filter(Boolean)
-    .map(value => new Date(value).getTime())
-    .filter(Number.isFinite)
-    .sort((a, b) => b - a)[0];
-  const latestSourceLabel = latestSourceAt ? new Date(latestSourceAt).toLocaleDateString() : 'No source uploaded yet';
+    .sort((a, b) => dateSortValue(b) - dateSortValue(a))[0];
+  const latestSourceLabel = latestSourceValue ? displayDate(latestSourceValue) : 'No source uploaded yet';
   const badge = (type) => {
     const t = (type || '').trim();
     if (!t) return '';
@@ -2248,9 +2235,10 @@ function renderTranscriptsPanel(project) {
     if (transcriptEditing === t.id) return transcriptEditRow(t);
     const isDsu = /dsu/i.test(t.type || '');
     const extracted = Array.isArray(t.extractedUpdates) ? t.extractedUpdates.length : 0;
+    const downloadUrl = PMSecurity.safeTranscriptUrl(t.file);
     const meta = [
       t.originalName || '',
-      t.date || (t.uploadedAt ? new Date(t.uploadedAt).toLocaleDateString() : ''),
+      t.date ? displayDate(t.date) : displayDate(t.uploadedAt),
       t.sourceKind === 'reference' ? 'reference only' : (isDsu ? `${extracted} update${extracted === 1 ? '' : 's'} extracted` : 'no extraction')
     ].filter(Boolean).join(' · ');
     return `
@@ -2264,6 +2252,7 @@ function renderTranscriptsPanel(project) {
           ${t.extractionNote ? `<p class="micro source-reference-note">${escapeHtml(t.extractionNote)}</p>` : ''}
         </div>
         <div style="display:flex;gap:6px;flex:none;">
+          ${downloadUrl ? `<a class="button button-small secondary" href="${escapeHtml(downloadUrl)}" download>Download</a>` : ''}
           <button class="button button-small secondary" onclick="startTranscriptEdit(${eventArg(t.id)})">Edit</button>
           <button class="button button-small danger" onclick="deleteItem(${eventArg(selectedProject)}, ${eventArg('transcript')}, ${eventArg(t.id)})">Delete</button>
         </div>
@@ -2311,7 +2300,7 @@ function renderTranscriptsPanel(project) {
       <div class="form-grid">
         <div class="field-row">
           <div><label>Meeting title</label><input id="meeting-title" placeholder="Weekly delivery sync" /></div>
-          <div><label>Date</label><input id="meeting-date" type="date" value="${new Date().toISOString().slice(0, 10)}" /></div>
+          <div><label>Date</label><input id="meeting-date" type="date" value="${PMSecurity.localDateKey()}" /></div>
         </div>
         <div class="field-row">
           <div><label>Type</label><select id="meeting-type"><option value="Meeting">Meeting note</option><option value="DSU">DSU / standup</option><option value="1:1">1:1</option></select></div>
@@ -2459,7 +2448,7 @@ function renderProjectUpdatesCard(projectName, project) {
       });
     });
   });
-  updates.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  updates.sort((a, b) => dateSortValue(b.date) - dateSortValue(a.date));
 
   const body = updates.length ? `
       <ul class="panel-list">
@@ -2536,8 +2525,8 @@ function renderManagePanel() {
     <div class="card advanced-settings-card">
       <details>
         <summary>Advanced: AI prompt templates</summary>
-        <p>DSU extraction is deterministic. This optional template controls the AI status-summary draft only; most users can leave it unchanged.</p>
-        <div class="form-row"><label>Status report prompt</label><textarea id="ai-prompt-status-report" rows="6">${escapeHtml(aiPrompts.statusReport)}</textarea></div>
+        <p>DSU extraction is deterministic. This optional guidance only tells AI which saved evidence to prioritize. The app still enforces JSON-only output, exact source citations, and deterministic fallback.</p>
+        <div class="form-row"><label>Status evidence-selection guidance</label><textarea id="ai-prompt-status-report" rows="6">${escapeHtml(aiPrompts.statusReport)}</textarea></div>
         <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
           <button class="button" onclick="saveAiPrompts()">Save AI Prompts</button>
           <span style="color:var(--success);">${aiPromptStatus}</span>
@@ -2661,7 +2650,7 @@ function renderManagePanel() {
       <div class="card workspace-data-card">
       <h4>Workspace Data</h4>
       <div class="form-grid">
-        <div class="form-row"><label>Search</label><input id="manage-search" type="text" placeholder="Search items" value="${manageSearch}" oninput="setManageFilter('search', this.value)" /></div>
+        <div class="form-row"><label>Search</label><input id="manage-search" type="text" placeholder="Search items" value="${escapeHtml(manageSearch)}" oninput="setManageFilter('search', this.value)" /></div>
         <div class="form-row"><label>Project</label>
           <select id="manage-project-filter" onchange="setManageFilter('project', this.value)">
             <option value="">All projects</option>
@@ -2700,11 +2689,10 @@ function renderManagePanel() {
           ${filteredItems.map(item => {
             const isEditing = manageEditing && manageEditing.project === item.project && manageEditing.type === item.type && manageEditing.id === item.id;
             if (isEditing) {
-              const nameValue = manageEditData.title || item.title;
-              const detailsValue = manageEditData.details || item.details;
-              const metaValue = manageEditData.meta || item.meta;
-              const dateValue = manageEditData.date || item.date;
-              const linkedValue = manageEditData.linked || item.linked;
+              const nameValue = manageEditData.title ?? item.title;
+              const detailsValue = manageEditData.details ?? item.details;
+              const metaValue = manageEditData.meta ?? item.meta;
+              const dateValue = manageEditData.date ?? item.date;
 
               return `
                 <li class="card">
@@ -2715,9 +2703,9 @@ function renderManagePanel() {
                     ${item.type === 'Timeline' ? `<div class="form-row"><label>Status</label><input id="edit-meta-${item.id}" value="${escapeHtml(metaValue)}" onchange="updateManageEditField('meta', this.value)" /></div>` : ''}
                     ${item.type === 'Transcript' ? `<div class="form-row"><label>Type</label><input id="edit-meta-${item.id}" value="${escapeHtml(metaValue)}" onchange="updateManageEditField('meta', this.value)" /></div>` : ''}
                     ${item.type === 'Ticket' ? `<div class="form-row"><label>Status</label><input id="edit-meta-${item.id}" value="${escapeHtml(metaValue)}" onchange="updateManageEditField('meta', this.value)" /></div>` : ''}
-                    <div class="form-row"><label>Date</label><input id="edit-date-${item.id}" type="date" value="${escapeHtml(dateValue)}" onchange="updateManageEditField('date', this.value)" /></div>
+                    ${item.type !== 'Story' ? `<div class="form-row"><label>Date</label><input id="edit-date-${item.id}" type="date" value="${escapeHtml(dateValue)}" onchange="updateManageEditField('date', this.value)" /></div>` : ''}
                     <div style="display:flex;gap:8px;">
-                      <button class="button" onclick="saveManageEdit(${eventArg(item.project)}, ${eventArg(item.type.toLowerCase())}, ${eventArg(item.id)})">Save</button>
+                      <button class="button" onclick="saveManageEdit(${eventArg(item.project)}, ${eventArg(item.type)}, ${eventArg(item.id)})">Save</button>
                       <button class="button secondary" onclick="cancelManageEdit()">Cancel</button>
                     </div>
                   </div>
@@ -2793,6 +2781,7 @@ function startManageEdit(project, type, id) {
   manageEditData = {
     title: item.title,
     details: item.details,
+    detailsField: item.detailsField,
     meta: item.meta,
     date: item.date
   };
@@ -2817,10 +2806,10 @@ async function saveManageEdit(project, type, id) {
   const payload = { project, id };
   if (manageEditData.title !== undefined) payload.title = manageEditData.title;
   if (manageEditData.details !== undefined) {
-    if (type === 'Ticket') payload.lastUpdate = manageEditData.details;
+    if (type === 'Story' && manageEditData.detailsField === 'description') payload.description = manageEditData.details;
     else payload.notes = manageEditData.details;
   }
-  if (manageEditData.date !== undefined) payload.date = manageEditData.date;
+  if (type !== 'Story' && manageEditData.date !== undefined) payload.date = manageEditData.date;
   if (manageEditData.meta !== undefined) {
     if (type === 'Story') payload.labels = manageEditData.meta.split(',').map(s => s.trim()).filter(Boolean);
     if (type === 'Timeline') payload.status = manageEditData.meta;
@@ -2848,7 +2837,8 @@ function buildExportRows(items) {
     Details: item.details,
     Meta: item.meta,
     Linked: item.linked,
-    Date: item.date
+    Date: item.date,
+    File: item.file || ''
   }));
 }
 
@@ -2886,9 +2876,9 @@ function exportManageMarkdown() {
   }
 
   const rows = buildExportRows(items);
-  const header = '| Type | Project | Title | Details | Meta | Linked | Date |';
-  const divider = '| --- | --- | --- | --- | --- | --- | --- |';
-  const body = rows.map(row => `| ${escapeMarkdown(row.Type)} | ${escapeMarkdown(row.Project)} | ${escapeMarkdown(row.Title)} | ${escapeMarkdown(row.Details)} | ${escapeMarkdown(row.Meta)} | ${escapeMarkdown(row.Linked)} | ${escapeMarkdown(row.Date)} |`).join('\n');
+  const header = '| Type | Project | Title | Details | Meta | Linked | Date | File |';
+  const divider = '| --- | --- | --- | --- | --- | --- | --- | --- |';
+  const body = rows.map(row => `| ${escapeMarkdown(row.Type)} | ${escapeMarkdown(row.Project)} | ${escapeMarkdown(row.Title)} | ${escapeMarkdown(row.Details)} | ${escapeMarkdown(row.Meta)} | ${escapeMarkdown(row.Linked)} | ${escapeMarkdown(row.Date)} | ${escapeMarkdown(row.File)} |`).join('\n');
   const content = [header, divider, body].join('\n');
 
   downloadFile('pilot-manage-export.md', content, 'text/markdown');
@@ -3623,12 +3613,8 @@ async function saveStructuredMeeting() {
   formData.append('type', document.getElementById('meeting-type')?.value || 'Meeting');
   formData.append('notes', sections.join('\n\n'));
 
-  const response = await fetch('/api/project/transcript', { method: 'POST', body: formData });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Unable to save meeting note' }));
-    alert(error.error || 'Unable to save meeting note');
-    return;
-  }
+  const response = await saveRequest('/api/project/transcript', { method: 'POST', body: formData });
+  if (!response) return;
   captureFocus = '';
   await refreshProject();
 }
@@ -3649,12 +3635,12 @@ async function uploadTranscript() {
   formData.append('metadata', JSON.stringify(captureSelectedFiles.map(item => ({ title: item.title.trim() || item.file.name, type: item.type }))));
   captureSelectedFiles.forEach(item => formData.append('files', item.file));
 
-  const response = await fetch('/api/project/transcript', {
+  const response = await saveRequest('/api/project/transcript', {
     method: 'POST',
     body: formData
   });
-  const result = await response.json().catch(() => ({ error: 'Unable to upload sources' }));
-  if (!response.ok) { alert(result.error || 'Unable to upload sources'); return; }
+  if (!response) return;
+  const result = await response.json();
 
   if (fileInput) fileInput.value = '';
   const warnings = result.warnings || [];

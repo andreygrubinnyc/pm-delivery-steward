@@ -10,8 +10,9 @@ Large delivery and PPM products usually optimize for enterprise administration, 
 
 - Runs on your machine and binds to `127.0.0.1` only.
 - Stores data locally in JSON files; no database or account is required.
+- Uses atomic JSON writes and rollback/recovery safeguards so transcript files and their metadata stay consistent.
 - Keeps DSU evidence extraction deterministic.
-- Offers optional AI drafting for status summaries and Teams messages, always as reviewable output.
+- Offers optional AI evidence selection for status summaries and Teams messages, always as reviewable output.
 
 ## Quick Start
 
@@ -28,15 +29,17 @@ If port 3000 is already in use, start the app on another local port, for example
 
 On first run, the app copies the fictional example from `data/demo-data.json` to the ignored local file `data/pilot-data.json`.
 
-## Optional AI Drafting
+Uploaded reference files remain local and can be downloaded from the Source intake screen. Stored records are validated before they are written, including dates, controlled status/type values, field lengths, and milestone links.
 
-The app works without AI. To enable optional AI drafts:
+## Optional AI Evidence Selection
+
+The app works without AI. Its report and Teams-message text is generated deterministically from saved project data. To let AI select additional supporting excerpts:
 
 ```bash
 cp .env.example .env
 ```
 
-Add either an OpenAI or Anthropic API key to `.env`, then restart the app. Keys remain on your local server and are never sent to the browser. AI drafts must be reviewed before copying or sending.
+Add either an OpenAI or Anthropic API key to `.env`, then restart the app. Keys remain on your local server and are never sent to the browser. Saved source material is sent as explicitly untrusted structured data; AI output must be JSON with source IDs and exact excerpts. The server validates every excerpt and uses the deterministic draft if validation fails. All output must still be reviewed before copying or sending.
 
 AI requests have a 45-second deadline by default (`AI_REQUEST_TIMEOUT_MS`, adjustable from 1 to 120 seconds). Anthropic keys are sent only to Anthropic's official Messages endpoint; custom provider URLs are not supported.
 
