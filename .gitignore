@@ -1,0 +1,19 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local user data and uploads
+data/pilot-data.json
+data/uploads/
+
+# Dependencies and generated output
+node_modules/
+coverage/
+*.log
+npm-debug.log*
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/

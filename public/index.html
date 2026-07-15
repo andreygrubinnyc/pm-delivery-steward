@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PM Delivery Steward</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo">P</div>
+        <div class="brand-text">
+          <h1>PM Delivery Steward</h1>
+          <span class="brand-sub">LOCAL · SINGLE-USER</span>
+        </div>
+        <button id="sidebar-toggle" class="sidebar-toggle" title="Collapse sidebar" aria-label="Collapse sidebar">‹</button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Project</div>
+        <div id="project-selector" class="project-selector"></div>
+      </div>
+
+      <nav id="main-nav" class="nav">
+        <div class="nav-group-label">Workspace</div>
+        <button class="nav-item active" data-tab="overview" title="Today"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span class="nav-label">Today</span><span class="nav-badge" data-badge="overview"></span></button>
+        <button class="nav-item" data-tab="stories" title="Work"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 10h16M4 14h16M4 18h16M7 8v8M10 8v8"/></svg><span class="nav-label">Work</span><span class="nav-badge" data-badge="stories"></span></button>
+        <button class="nav-item" data-tab="tracking" title="Follow-Up"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg><span class="nav-label">Follow-Up</span><span class="nav-badge" data-badge="tracking"></span></button>
+        <button class="nav-item" data-tab="timeline" title="Milestones"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="6" r="2"/><circle cx="12" cy="18" r="2"/><circle cx="12" cy="12" r="2"/><line x1="12" y1="8" x2="12" y2="10"/><line x1="12" y1="14" x2="12" y2="16"/></svg><span class="nav-label">Milestones</span><span class="nav-badge" data-badge="timeline"></span></button>
+        <button class="nav-item" data-tab="transcripts" title="Capture"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="13" x2="12" y2="17"/><line x1="9" y1="15" x2="15" y2="15"/></svg><span class="nav-label">Capture</span><span class="nav-badge" data-badge="transcripts"></span></button>
+        <div class="nav-group-label">Communicate</div>
+        <button class="nav-item" data-tab="portfolio" title="Portfolio"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9h12M6 9c0-1.1.9-2 2-2h8c1.1 0 2 .9 2 2M6 9v9c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V9M9 13h6"/></svg><span class="nav-label">Portfolio</span><span class="nav-badge" data-badge="portfolio"></span></button>
+        <button class="nav-item" data-tab="reports" title="Communicate"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0 2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2 2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="13" x2="12" y2="17"/><line x1="9" y1="15" x2="15" y2="15"/><polyline points="9 11 12 9 15 11"/></svg><span class="nav-label">Communicate</span><span class="nav-badge" data-badge="reports"></span></button>
+        <button class="nav-item" data-tab="teams" title="Teams Draft"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="8" r="2"/><circle cx="16" cy="8" r="2"/><circle cx="12" cy="15" r="2"/><path d="M8 10c0 1 2 2 4 2s4-1 4-2"/><path d="M12 17v3"/></svg><span class="nav-label">Teams Draft</span><span class="nav-badge" data-badge="teams"></span></button>
+        <div class="nav-group-label">Configure</div>
+        <button class="nav-item" data-tab="manage" title="Settings"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></svg><span class="nav-label">Settings</span><span class="nav-badge" data-badge="manage"></span></button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="footer-avatar"></div>
+        <div class="footer-text">
+          <span class="footer-role">Delivery PM</span>
+          <span id="ai-mode" class="footer-sub">heuristic mode · no AI key</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-title">
+          <h2 id="main-title">Today</h2>
+          <span id="main-subtitle" class="header-scope">project workspace</span>
+        </div>
+        <div class="header-actions">
+          <button id="quick-capture-button" class="quick-capture-button" title="Capture a meeting note or evidence">+ Capture</button>
+          <button id="help-button" class="help-button" title="Help" aria-label="Help">?</button>
+        </div>
+      </header>
+
+      <section id="view-area" class="view-area">
+        <div id="overview-panel" class="panel active-panel"></div>
+        <div id="portfolio-panel" class="panel"></div>
+        <div id="stories-panel" class="panel"></div>
+        <div id="tracking-panel" class="panel"></div>
+        <div id="timeline-panel" class="panel"></div>
+        <div id="transcripts-panel" class="panel"></div>
+        <div id="reports-panel" class="panel"></div>
+        <div id="teams-panel" class="panel"></div>
+        <div id="manage-panel" class="panel"></div>
+        <div id="help-panel" class="panel"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

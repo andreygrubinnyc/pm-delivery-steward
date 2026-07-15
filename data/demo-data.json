@@ -1,0 +1,99 @@
+{
+  "settings": {
+    "commentStaleDays": 7,
+    "sprintOptions": [
+      "Northstar Sprint 14",
+      "Northstar Sprint 15"
+    ]
+  },
+  "projects": {
+    "Northstar Data Modernization": {
+      "description": "Fictional demo project for a local delivery workspace.",
+      "assigneeDirectory": {
+        "alexr": "Alex Rivera",
+        "jamiec": "Jamie Chen",
+        "taylorm": "Taylor Morgan"
+      },
+      "statusMappings": {
+        "Backlog": "Planned",
+        "In Development": "In progress",
+        "QA": "In progress",
+        "Blocked": "Blocked",
+        "Done": "Done"
+      },
+      "stories": [
+        {
+          "id": "story-ns-101",
+          "jiraId": "NSTR-101",
+          "summary": "Create source-to-target mapping",
+          "description": "Document the agreed source fields and target model.",
+          "labels": ["In progress"],
+          "assignee": "Alex Rivera",
+          "sprint": "Northstar Sprint 14",
+          "tracked": true,
+          "contacted": true,
+          "lastComment": "Mapping workshop completed; two field definitions remain for review.",
+          "lastCommentedAt": "2026-07-10",
+          "updates": [
+            {
+              "id": "update-ns-101-1",
+              "excerpt": "Mapping workshop completed; two field definitions remain for review.",
+              "update": "Mapping workshop completed; two field definitions remain for review.",
+              "source": "Demo standup",
+              "date": "2026-07-10"
+            }
+          ]
+        },
+        {
+          "id": "story-ns-102",
+          "jiraId": "NSTR-102",
+          "summary": "Build incremental load pipeline",
+          "description": "Implement the pipeline after mapping approval.",
+          "labels": ["Planned"],
+          "assignee": "Jamie Chen",
+          "sprint": "Northstar Sprint 15",
+          "tracked": true,
+          "contacted": false,
+          "lastComment": "Awaiting the final mapping approval before development begins.",
+          "lastCommentedAt": "2026-07-08",
+          "updates": []
+        },
+        {
+          "id": "story-ns-103",
+          "jiraId": "NSTR-103",
+          "summary": "Validate reconciliation report",
+          "description": "Confirm report totals match the approved sample data.",
+          "labels": ["Blocked"],
+          "assignee": "Taylor Morgan",
+          "sprint": "Northstar Sprint 14",
+          "tracked": true,
+          "contacted": false,
+          "dependencies": "Sample data extract from the platform team",
+          "lastComment": "Blocked pending the sample extract.",
+          "lastCommentedAt": "2026-07-09",
+          "updates": []
+        }
+      ],
+      "timeline": [
+        {
+          "id": "timeline-ns-1",
+          "title": "Mapping approval",
+          "date": "2026-07-17",
+          "status": "Upcoming",
+          "notes": "Fictional demo milestone."
+        }
+      ],
+      "transcripts": [
+        {
+          "id": "transcript-demo-1",
+          "title": "Demo standup notes",
+          "notes": "Fictional example: mapping workshop completed; two field definitions remain for review.",
+          "date": "2026-07-10",
+          "type": "DSU",
+          "sourceKind": "text",
+          "uploadedAt": "2026-07-10T14:00:00.000Z"
+        }
+      ]
+    }
+  }
+}
