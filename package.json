@@ -1,6 +1,6 @@
 {
   "name": "pm-delivery-steward",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A local, evidence-grounded delivery workspace for project managers and scrum masters.",
   "license": "MIT",
   "private": false,
@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check public/security.js && node --check public/app.js",
+    "check": "node --check server.js && node --check lib/runtime-security.js && node --check public/security.js && node --check public/app.js",
     "test": "npm run check && node --test",
     "audit": "npm audit --omit=dev"
   },

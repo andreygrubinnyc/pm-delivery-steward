@@ -5,6 +5,13 @@ const crypto = require('crypto');
 const Busboy = require('busboy');
 const { rateLimit } = require('express-rate-limit');
 const { isTrustedMutationRequest } = require('./public/security');
+const {
+  ProviderRequestError,
+  ProviderTimeoutError,
+  createPersistentId,
+  fetchWithTimeout,
+  getTrustedClaudeApiUrl
+} = require('./lib/runtime-security');
 
 // Lightweight .env loader (dependency-free). Loads the local optional config into process.env
 // without overriding variables already set in the real environment.
@@ -54,29 +61,42 @@ function parseMultipart(req, { maxFiles = 5, allowedFields = [] } = {}) {
     let receivedBytes = 0;
     let parser;
     try {
-      parser = Busboy({ headers: req.headers, limits: { files: maxFiles, fileSize: maxUploadSize, fields: 30, fieldSize: 1024 * 1024 } });
+      parser = Busboy({
+        headers: req.headers,
+        limits: {
+          files: maxFiles,
+          fileSize: maxUploadSize,
+          fields: Math.max(allowedFields.length, 1),
+          fieldSize: 256 * 1024
+        }
+      });
     } catch (_) {
       reject(new Error('Expected a multipart form upload.'));
       return;
     }
-    parser.on('field', (name, value) => { if (!allowedFields.length || allowedFields.includes(name)) fields[name] = value; });
+    parser.on('field', (name, value, info) => {
+      if (info.valueTruncated) failure = new Error('Each upload field must be 256 KB or smaller.');
+      if (!allowedFields.length || allowedFields.includes(name)) fields[name] = value;
+    });
     parser.on('file', (fieldname, stream, info) => {
       const extension = path.extname(info.filename || '').toLowerCase();
       const chunks = [];
       if (!allowedUploadExtensions.has(extension)) failure = new Error('This file type is not supported.');
-      stream.on('data', chunk => {
-        receivedBytes += chunk.length;
-        if (receivedBytes > maxUploadRequestSize) failure = new Error('Uploads are limited to 20 MB per request.');
-        if (!failure) chunks.push(chunk);
-      });
+      stream.on('data', chunk => { if (!failure) chunks.push(chunk); });
       stream.on('limit', () => { failure = new Error('Each uploaded file must be 10 MB or smaller.'); });
       stream.on('end', () => {
         if (!failure) files.push({ fieldname, originalname: info.filename, mimetype: info.mimeType, buffer: Buffer.concat(chunks) });
       });
     });
     parser.on('filesLimit', () => { failure = new Error(`Upload up to ${maxFiles} files at a time.`); });
+    parser.on('fieldsLimit', () => { failure = new Error('Too many upload fields.'); });
     parser.on('error', reject);
     parser.on('finish', () => failure ? reject(failure) : resolve({ fields, files }));
+    // Count the entire request, not only file payloads, so large text fields cannot bypass the aggregate limit.
+    req.on('data', chunk => {
+      receivedBytes += chunk.length;
+      if (receivedBytes > maxUploadRequestSize) failure = new Error('Uploads are limited to 20 MB per request.');
+    });
     req.pipe(parser);
   });
 }
@@ -387,7 +407,7 @@ async function callOpenAIApi(prompt) {
 
   const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
   const maxTokens = parseInt(process.env.OPENAI_MAX_TOKENS, 10) || 2000;
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+  const response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -406,9 +426,11 @@ async function callOpenAIApi(prompt) {
     })
   });
 
-  const data = await response.json();
+  let data;
+  try { data = await response.json(); }
+  catch (_) { throw new ProviderRequestError('OpenAI returned an unreadable response.'); }
   if (!response.ok) {
-    throw new Error(`OpenAI API error ${response.status}: ${data?.error?.message || 'unknown error'}`);
+    throw new ProviderRequestError(`OpenAI API error ${response.status}: ${data?.error?.message || 'unknown error'}`);
   }
   return data?.choices?.[0]?.message?.content || '';
 }
@@ -417,8 +439,8 @@ async function callClaudeApi(prompt) {
   const apiKey = process.env.CLAUDE_API_KEY;
   if (!apiKey) throw new Error('Missing CLAUDE_API_KEY');
 
-  const apiUrl = process.env.CLAUDE_API_URL || 'https://api.anthropic.com/v1/messages';
-  const response = await fetch(apiUrl, {
+  const apiUrl = getTrustedClaudeApiUrl();
+  const response = await fetchWithTimeout(apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -432,9 +454,11 @@ async function callClaudeApi(prompt) {
     })
   });
 
-  const data = await response.json();
+  let data;
+  try { data = await response.json(); }
+  catch (_) { throw new ProviderRequestError('Claude returned an unreadable response.'); }
   if (!response.ok) {
-    throw new Error(`Claude API error ${response.status}: ${data?.error?.message || 'unknown error'}`);
+    throw new ProviderRequestError(`Claude API error ${response.status}: ${data?.error?.message || 'unknown error'}`);
   }
   // The Messages API returns a content array of typed blocks; concatenate the text blocks.
   if (Array.isArray(data?.content)) {
@@ -744,7 +768,7 @@ function attachUpdatesToStories(projectData, transcript, updates) {
       (u.transcriptTitle || '') === (transcript.title || ''));
     if (duplicate) return;
     story.updates.unshift({
-      id: `update-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: createPersistentId('update'),
       transcriptId: transcript.id,
       transcriptTitle: transcript.title,
       excerpt: item.excerpt || '',
@@ -1003,7 +1027,7 @@ app.post('/api/project/story', (req, res) => {
   }
 
   const story = {
-    id: `story-${Date.now()}`,
+    id: createPersistentId('story'),
     summary,
     description: description || '',
     acceptanceCriteria: Array.isArray(acceptanceCriteria) ? acceptanceCriteria : (acceptanceCriteria ? acceptanceCriteria.split('\n').map(item => item.trim()).filter(Boolean) : []),
@@ -1074,7 +1098,7 @@ app.post('/api/project/story/import', (req, res) => {
     if (normalizedJiraId) existingJiraIds.add(normalizedJiraId);
     const lastCommentedAt = String(item.lastCommentedAt || '').trim();
     const story = {
-      id: `story-${Date.now()}-${index}`,
+      id: createPersistentId('story'),
       summary,
       description: String(item.description || '').trim(),
       acceptanceCriteria: Array.isArray(item.acceptanceCriteria) ? item.acceptanceCriteria.map(value => String(value || '').trim()).filter(Boolean) : [],
@@ -1181,7 +1205,7 @@ app.post('/api/project/timeline', (req, res) => {
   }
 
   const entry = {
-    id: `timeline-${Date.now()}`,
+    id: createPersistentId('timeline'),
     title,
     date: date || new Date().toISOString().slice(0, 10),
     status: status || 'Planned',
@@ -1445,7 +1469,7 @@ app.post('/api/project/transcript', uploadRateLimit, wrap(async (req, res) => {
     const type = validTypes.has(details.type) ? details.type : (fields.type || 'Notes');
     const isTextFile = !file || file.mimetype.startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(file.originalname);
     const transcript = {
-      id: `transcript-${Date.now()}-${index}`,
+      id: createPersistentId('transcript'),
       title: String(details.title || (file && file.originalname) || fields.title || 'Meeting note').trim(),
       file: file ? `/uploads/transcripts/${file.filename}` : '',
       originalName: file ? file.originalname : '',
@@ -1581,7 +1605,9 @@ app.post('/api/project/teams-update', wrap(async (req, res) => {
 app.use((err, req, res, next) => {
   console.error('Request error:', err && err.message);
   if (res.headersSent) return next(err);
-  if (/file type|multipart|uploaded file|upload up to|uploads are limited/i.test(err && err.message)) return res.status(400).json({ error: err.message });
+  if (err instanceof ProviderTimeoutError) return res.status(504).json({ error: err.message });
+  if (err instanceof ProviderRequestError) return res.status(502).json({ error: err.message });
+  if (/file type|multipart|uploaded file|upload up to|uploads are limited|too many upload fields|upload field/i.test(err && err.message)) return res.status(400).json({ error: err.message });
   res.status(500).json({ error: 'The request could not be completed. Check the local server log for details.' });
 });
 
