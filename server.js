@@ -1,10 +1,16 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const Busboy = require('busboy');
 const { rateLimit } = require('express-rate-limit');
-const { isTrustedMutationRequest } = require('./public/security');
+const {
+  isTrustedMutationRequest,
+  operatingStatusFromValue,
+  operatingStatusFromLabels,
+  daysSinceIso,
+  localDateKey,
+  daysUntilDateOnly
+} = require('./public/security');
 const {
   ProviderRequestError,
   ProviderTimeoutError,
@@ -12,6 +18,40 @@ const {
   fetchWithTimeout,
   getTrustedClaudeApiUrl
 } = require('./lib/runtime-security');
+const { extractDsuUpdates } = require('./lib/delivery-integrity');
+const {
+  attachUpdatesToStories,
+  removeTranscriptEvidence,
+  removeStoryUpdate,
+  storyLastCommentText
+} = require('./lib/evidence-integrity');
+const {
+  stageUploadFiles,
+  rollbackStagedUploads,
+  commitStagedUploads,
+  commitFileDeletions,
+  transcriptDiskPath,
+  reconcileUploadDirectory
+} = require('./lib/storage-integrity');
+const {
+  ValidationError,
+  plainObject,
+  rejectUnknownFields,
+  text: validateText,
+  bool: validateBoolean,
+  textList: validateTextList,
+  validateStoryCreate,
+  validateStoryUpdate,
+  validateTimelineCreate,
+  validateTimelineUpdate,
+  validateTranscriptUpdate,
+  validateTranscriptUpload
+} = require('./lib/input-validation');
+const {
+  buildEvidenceRecords,
+  formatGroundedEvidence,
+  selectGroundedClaims
+} = require('./lib/grounded-ai');
 
 // Lightweight .env loader (dependency-free). Loads the local optional config into process.env
 // without overriding variables already set in the real environment.
@@ -101,13 +141,6 @@ function parseMultipart(req, { maxFiles = 5, allowedFields = [] } = {}) {
   });
 }
 
-function persistUpload(file) {
-  const filename = crypto.randomBytes(16).toString('hex');
-  const diskPath = path.join(transcriptsDir, filename);
-  fs.writeFileSync(diskPath, file.buffer);
-  return { ...file, filename, path: diskPath };
-}
-
 app.disable('x-powered-by');
 app.use((req, res, next) => {
   res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'");
@@ -172,17 +205,14 @@ function getProject(data, name) {
   return data.projects[name];
 }
 
-// Remove an uploaded transcript's file from disk (basename guards against path traversal).
-function deleteTranscriptFile(transcript) {
-  if (!transcript || !transcript.file) return;
-  try {
-    const diskPath = path.join(transcriptsDir, path.basename(transcript.file));
-    if (fs.existsSync(diskPath)) fs.unlinkSync(diskPath);
-  } catch (error) {
-    console.warn('Could not delete transcript file:', error.message);
-  }
+try {
+  const storageChanges = reconcileUploadDirectory(readData(), transcriptsDir);
+  if (storageChanges.length) console.warn(`Reconciled ${storageChanges.length} interrupted or orphaned upload file(s).`);
+} catch (error) {
+  console.warn('Upload storage reconciliation could not run:', error.message);
 }
 
+// Remove an uploaded transcript's file from disk (basename guards against path traversal).
 function normalizeText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
@@ -221,32 +251,13 @@ function mappedOperatingStatus(projectData, jiraStatus) {
 }
 
 function defaultOperatingStatus(jiraStatus) {
-  const statusText = normalizeText(jiraStatus);
-  if (/done|resolved|closed|complete/.test(statusText)) return 'Done';
-  if (/in progress|in-progress|ongoing/.test(statusText)) return 'In progress';
-  if (/blocked|on hold/.test(statusText)) return 'Blocked';
-  if (/active/.test(statusText)) return 'Active';
-  if (/planned|to do|todo|backlog|open/.test(statusText)) return 'Planned';
-  return '';
+  return operatingStatusFromValue(jiraStatus);
 }
 
 function applyOperatingStatusLabel(labels, operatingStatus) {
   const standardLabels = new Set(['done', 'in progress', 'in-progress', 'blocked', 'active', 'planned', 'not started', 'not-started']);
   const next = (Array.isArray(labels) ? labels : []).filter(label => !standardLabels.has(normalizeText(label)));
   return operatingStatus ? [...new Set([operatingStatus.toLowerCase(), ...next])] : next;
-}
-
-function extractJsonFromText(text) {
-  const start = text.indexOf('[');
-  const end = text.lastIndexOf(']');
-  if (start !== -1 && end !== -1 && end > start) {
-    try {
-      return JSON.parse(text.slice(start, end + 1));
-    } catch (_error) {
-      return null;
-    }
-  }
-  return null;
 }
 
 function parseCsv(text) {
@@ -347,22 +358,15 @@ function mapCsvWorkItems(csvText, projectData) {
   return { columns: Object.keys(columns), items, skipped };
 }
 
-const defaultDsuExtractionPrompt = `You are given a DSU transcript and a list of active stories for a project. Extract concise update items that refer to one or more of these stories and return valid JSON only. The JSON must be an array of objects with keys: storyId, excerpt, update, source. Use only the provided storyId values. excerpt must be a phrase copied directly from the transcript (do not paraphrase it); update should be a Jira-friendly summary of that same update; source should identify the transcript title or file name. Only extract updates that are explicitly supported by the transcript text — do not infer, assume, or invent. If a story is not clearly discussed in the transcript, omit it. If the transcript contains no relevant updates, return an empty array []. You must not include any explanation outside the JSON array.\n\nProject stories:\n{{storyList}}\n\nTranscript title: {{transcriptTitle}}\nTranscript type: {{transcriptType}}\nTranscript text:\n{{transcriptText}}`;
-
-const defaultStatusReportPrompt = `You are a delivery lead writing a concise, professional project status summary in Markdown for leadership or stakeholder readouts. Use only the information provided below. Do not invent or overstate anything: no made-up progress, risks, dates, owners, next steps, confidence, percentages, or milestone health. If the data is missing or mixed, say that explicitly. When the evidence does not support a clean green/yellow/red call, use cautious phrasing such as "mixed signals based on recorded data" rather than guessing. Preserve any date marked "(estimated)" as estimated.\n\nFormat the summary exactly with these sections:\n# {{projectName}} Status Summary\n## Overall Status\n- Status signal: <one short line grounded in the data>\n- Executive summary: <2-4 sentences, factual and scannable>\n## Delivery Highlights\n- Bullet list only from explicit completed/in-progress/active evidence\n## Risks and Blockers\n- Bullet list of explicit blockers, dependency issues, follow-up concerns, milestone pressure, or "No explicit risks recorded"\n## Milestones\n- Bullet list of milestone title, date, and recorded status/notes only\n## Work Items Needing Attention\n- Bullet list of explicit blocked, stale, unowned, or follow-up-needing items, or say none are recorded\n## Evidence Gaps\n- Bullet list of missing or weak data that limits confidence in the summary\n\nUse Jira IDs only when they are provided. Keep it factual, concise, and ready to paste into a status update.\n\nProject: {{projectName}}\n\nTimeline:\n{{timelineList}}\n\nStories:\n{{storyList}}\n\nTranscripts:\n{{transcriptList}}`;
+const defaultStatusReportPrompt = 'Prioritize current operating status, explicit blockers and dependencies, milestone pressure, recent captured updates, and evidence gaps. Prefer concise evidence that will help a project manager verify the deterministic status summary.';
 
 function getAiPrompts(data) {
   if (!data.aiPrompts) {
     data.aiPrompts = {};
   }
   return {
-    dsuExtraction: data.aiPrompts.dsuExtraction || defaultDsuExtractionPrompt,
     statusReport: data.aiPrompts.statusReport || defaultStatusReportPrompt
   };
-}
-
-function renderPrompt(template, context) {
-  return String(template || '').replace(/\{\{(\w+)\}\}/g, (_, key) => context[key] || '');
 }
 
 function storyAssignee(story) {
@@ -371,10 +375,6 @@ function storyAssignee(story) {
 
 function storySprint(story) {
   return String((story && story.sprint) || '').trim();
-}
-
-function storyLastCommentText(story) {
-  return String((story && (story.lastComment || story.lastUpdate)) || '').trim();
 }
 
 // App-wide settings for follow-up nudges and controlled vocab like sprint names.
@@ -401,12 +401,26 @@ function getProvider() {
   return null;
 }
 
-async function callOpenAIApi(prompt) {
+function normalizeLlmRequest(request) {
+  if (request && typeof request === 'object') {
+    return {
+      system: String(request.system || 'You are a helpful project delivery operations assistant.'),
+      user: String(request.user || '')
+    };
+  }
+  return {
+    system: 'You are a helpful project delivery operations assistant. Follow the user\'s instructions exactly and return only what they ask for, in the requested format.',
+    user: String(request || '')
+  };
+}
+
+async function callOpenAIApi(request) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('Missing OPENAI_API_KEY');
 
   const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
   const maxTokens = parseInt(process.env.OPENAI_MAX_TOKENS, 10) || 2000;
+  const llmRequest = normalizeLlmRequest(request);
   const response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -416,10 +430,8 @@ async function callOpenAIApi(prompt) {
     body: JSON.stringify({
       model,
       messages: [
-        // Neutral system prompt: callOpenAIApi serves all features (extraction, status
-        // reports, Teams updates), so it must not bias toward any one task/format.
-        { role: 'system', content: 'You are a helpful project delivery operations assistant. Follow the user\'s instructions exactly and return only what they ask for, in the requested format.' },
-        { role: 'user', content: prompt }
+        { role: 'system', content: llmRequest.system },
+        { role: 'user', content: llmRequest.user }
       ],
       temperature: 0.1,
       max_tokens: maxTokens
@@ -435,11 +447,12 @@ async function callOpenAIApi(prompt) {
   return data?.choices?.[0]?.message?.content || '';
 }
 
-async function callClaudeApi(prompt) {
+async function callClaudeApi(request) {
   const apiKey = process.env.CLAUDE_API_KEY;
   if (!apiKey) throw new Error('Missing CLAUDE_API_KEY');
 
   const apiUrl = getTrustedClaudeApiUrl();
+  const llmRequest = normalizeLlmRequest(request);
   const response = await fetchWithTimeout(apiUrl, {
     method: 'POST',
     headers: {
@@ -450,7 +463,8 @@ async function callClaudeApi(prompt) {
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL || 'claude-opus-4-8',
       max_tokens: parseInt(process.env.CLAUDE_MAX_TOKENS, 10) || 2000,
-      messages: [{ role: 'user', content: prompt }]
+      system: llmRequest.system,
+      messages: [{ role: 'user', content: llmRequest.user }]
     })
   });
 
@@ -467,82 +481,24 @@ async function callClaudeApi(prompt) {
   return '';
 }
 
-async function callLlm(prompt) {
+async function callLlm(request) {
   const provider = getProvider();
   if (!provider) {
     throw new Error('No AI provider configured. Set OPENAI_API_KEY or CLAUDE_API_KEY.');
   }
   if (provider === 'openai') {
-    return await callOpenAIApi(prompt);
+    return await callOpenAIApi(request);
   }
-  return await callClaudeApi(prompt);
+  return await callClaudeApi(request);
 }
 
-function renderStoryListForPrompt(projectData) {
-  return projectData.stories.map(story => `- id: ${story.id}\n  summary: ${story.summary.trim()}\n  description: ${story.description ? story.description.trim() : ''}`).join('\n');
-}
-
-// Richer story rendering for the status-report prompt: includes inferred status, labels,
-// dependencies, notes, and the most recent updates so the report reflects real state
-// (blockers, done items, DSU-derived progress) rather than just titles/descriptions.
-function renderStoryListForReport(projectData) {
-  return projectData.stories.map(story => {
-    const labels = Array.isArray(story.labels) ? story.labels.join(', ') : String(story.labels || '');
-    const recent = Array.isArray(story.updates) ? story.updates.slice(0, 3) : [];
-    const linkedMilestone = story.timelineId ? (projectData.timeline.find(entry => entry.id === story.timelineId) || null) : null;
-    const lines = [
-      `- summary: ${story.summary.trim()}`,
-      `  status: ${inferStoryStatus(story)}`
-    ];
-    if (story.jiraId) lines.push(`  jiraId: ${story.jiraId}`);
-    if (storyAssignee(story)) lines.push(`  assignee: ${storyAssignee(story)}`);
-    if (storySprint(story)) lines.push(`  sprint: ${storySprint(story)}`);
-    if (story.tracked) lines.push(`  tracked: yes`);
-    if (typeof story.contacted === 'boolean') lines.push(`  contacted: ${story.contacted ? 'yes' : 'no'}`);
-    if (story.lastCommentedAt) lines.push(`  lastCommentedAt: ${story.lastCommentedAt}`);
-    if (storyLastCommentText(story)) lines.push(`  lastComment: ${storyLastCommentText(story)}`);
-    if (labels) lines.push(`  labels: ${labels}`);
-    if (story.description) lines.push(`  description: ${story.description.trim()}`);
-    if (story.dependencies) lines.push(`  dependencies: ${story.dependencies}`);
-    if (story.notes) lines.push(`  notes: ${story.notes.trim()}`);
-    if (linkedMilestone) lines.push(`  linked milestone: ${linkedMilestone.title}${linkedMilestone.date ? ` (${linkedMilestone.date})` : ''}`);
-    if (recent.length) {
-      lines.push('  recent updates:');
-      recent.forEach(update => {
-        const text = (update.update || update.excerpt || '').trim();
-        const source = update.source || update.transcriptTitle || '';
-        lines.push(`    - ${text}${source ? ` (source: ${source})` : ''}`);
-      });
-    }
-    return lines.join('\n');
-  }).join('\n');
-}
-
-function renderTimelineListForPrompt(projectData) {
-  return projectData.timeline.map(entry => `- id: ${entry.id}\n  title: ${entry.title}\n  date: ${entry.date || ''}\n  status: ${entry.status || ''}\n  notes: ${entry.notes || ''}`).join('\n');
-}
-
-function renderTranscriptListForPrompt(projectData) {
-  return projectData.transcripts.map(item => `- id: ${item.id}\n  title: ${item.title}\n  type: ${item.type || ''}\n  date: ${item.date || item.uploadedAt || ''}\n  notes: ${item.notes || ''}`).join('\n');
-}
 
 function inferStoryStatus(story) {
-  const labels = Array.isArray(story.labels) ? story.labels.join(' ').toLowerCase() : String(story.labels || '').toLowerCase();
-  if (labels.includes('done') || labels.includes('complete') || labels.includes('completed')) return 'Done';
-  if (labels.includes('in progress') || labels.includes('in-progress') || labels.includes('ongoing')) return 'In progress';
-  if (labels.includes('blocked') || labels.includes('on hold')) return 'Blocked';
-  if (labels.includes('active')) return 'Active';
-  if (labels.includes('planned') || labels.includes('to do') || labels.includes('todo') || labels.includes('backlog')) return 'Planned';
+  const recordedStatus = operatingStatusFromLabels(story && story.labels);
+  if (recordedStatus) return recordedStatus;
   if (story.updates && story.updates.length) return 'Active';
   if (story.timelineId) return 'Planned';
   return 'Not started';
-}
-
-function daysSinceIso(value) {
-  if (!value) return null;
-  const then = new Date(value).getTime();
-  if (!Number.isFinite(then)) return null;
-  return Math.floor((Date.now() - then) / 86400000);
 }
 
 function itemNeedsFollowupServer(story) {
@@ -555,20 +511,9 @@ function itemNeedsCommentServer(story, settings) {
   return d === null || d >= ((settings && settings.commentStaleDays) || 7);
 }
 
-function daysUntilDate(value) {
-  if (!value) return null;
-  const target = new Date(value);
-  if (Number.isNaN(target.getTime())) return null;
-  const now = new Date();
-  target.setHours(0, 0, 0, 0);
-  now.setHours(0, 0, 0, 0);
-  return Math.round((target - now) / 86400000);
-}
-
 function milestoneHealthLabel(entry) {
-  const status = String((entry && entry.status) || '').toLowerCase();
-  if (/(done|complete|completed|closed)/.test(status)) return 'Complete';
-  const until = daysUntilDate(entry && entry.date);
+  if (operatingStatusFromValue(entry && entry.status) === 'Done') return 'Complete';
+  const until = daysUntilDateOnly(entry && entry.date);
   if (until === null) return 'No date';
   if (until < 0) return 'Overdue';
   if (until <= 7) return 'Due soon';
@@ -582,9 +527,7 @@ function storyDisplay(story) {
 
 function generateHeuristicStatusReport(projectData, projectName, settings) {
   const timeline = [...projectData.timeline].sort((a, b) => {
-    const aTime = a.date ? new Date(a.date).getTime() : 0;
-    const bTime = b.date ? new Date(b.date).getTime() : 0;
-    return aTime - bTime;
+    return String(a.date || '').localeCompare(String(b.date || ''));
   });
   const stories = [...projectData.stories];
   const transcripts = [...projectData.transcripts];
@@ -730,97 +673,6 @@ function generateHeuristicStatusReport(projectData, projectName, settings) {
   return lines.join('\n');
 }
 
-function parseUpdatesResponse(rawText) {
-  const trimmed = String(rawText || '').trim();
-  const parsed = extractJsonFromText(trimmed);
-  if (parsed) return parsed;
-  try {
-    return JSON.parse(trimmed);
-  } catch (_error) {
-    return [];
-  }
-}
-
-async function runLlmExtraction(projectData, transcript, transcriptText, promptTemplate) {
-  const prompt = renderPrompt(promptTemplate || defaultDsuExtractionPrompt, {
-    storyList: renderStoryListForPrompt(projectData),
-    transcriptTitle: transcript.title || '',
-    transcriptType: transcript.type || '',
-    transcriptText
-  });
-  const output = await callLlm(prompt);
-  const items = parseUpdatesResponse(output);
-  if (!Array.isArray(items)) return [];
-  return items.filter(item => item && item.storyId && (item.excerpt || item.update));
-}
-
-function attachUpdatesToStories(projectData, transcript, updates) {
-  const storyMap = new Map(projectData.stories.map(story => [story.id, story]));
-  updates.forEach(item => {
-    const story = storyMap.get(item.storyId);
-    if (!story) return;
-    if (!Array.isArray(story.updates)) story.updates = [];
-    // Skip if the same update text from a transcript of the same title already exists —
-    // prevents duplicate updates when the same DSU is uploaded more than once.
-    const newText = (item.update || item.excerpt || '').trim();
-    const duplicate = story.updates.some(u =>
-      (u.update || u.excerpt || '').trim() === newText &&
-      (u.transcriptTitle || '') === (transcript.title || ''));
-    if (duplicate) return;
-    story.updates.unshift({
-      id: createPersistentId('update'),
-      transcriptId: transcript.id,
-      transcriptTitle: transcript.title,
-      excerpt: item.excerpt || '',
-      update: item.update || item.excerpt || '',
-      date: transcript.date || transcript.uploadedAt || new Date().toISOString(),
-      source: item.source || transcript.title
-    });
-    // Auto-derive lastUpdate from the most recent update's date (Option B design).
-    // The lastUpdate field is now auto-populated, with optional lastUpdateNotes for manual annotation.
-    if (story.updates.length > 0) {
-      story.lastUpdate = story.updates[0].date;
-    }
-  });
-}
-
-function extractDsuUpdates(projectData, transcript, sourceText) {
-  const normalized = normalizeText(sourceText);
-  if (!normalized) return [];
-
-  // Split into candidate segments on line breaks AND sentence punctuation, then strip
-  // leading markdown markers (#, >, *, -) so excerpts aren't one giant header/heading blob.
-  const segments = sourceText
-    .split(/\r?\n|(?<=[.!?])\s+/)
-    .map(s => s.replace(/^[#>*\-\s]+/, '').trim())
-    .filter(s => s.length > 15);
-
-  const updates = [];
-  projectData.stories.forEach(story => {
-    const storySummary = normalizeText(story.summary || '');
-    const storyIdToken = (story.id || '').toLowerCase();
-    const storyWords = storySummary.split(' ').filter(word => word.length > 3);
-    const matchCount = storyWords.reduce((count, word) => count + (normalized.includes(word) ? 1 : 0), 0);
-    const threshold = Math.min(3, Math.max(1, storyWords.length));
-    const matched = normalized.includes(storyIdToken) || matchCount >= threshold;
-    if (!matched) return;
-
-    const excerptSource = segments.find(segment => {
-      const segmentText = normalizeText(segment);
-      if (storyIdToken && segmentText.includes(storyIdToken)) return true;
-      return storyWords.some(word => segmentText.includes(word));
-    }) || segments[0] || sourceText;
-
-    const excerpt = excerptSource.replace(/\s+/g, ' ').trim().slice(0, 220);
-
-    // Return items only. attachUpdatesToStories() is the single writer to story.updates
-    // here, exactly as it is for the AI path — so neither path double-writes updates.
-    updates.push({ storyId: story.id, excerpt });
-  });
-
-  return updates;
-}
-
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -831,19 +683,15 @@ app.get('/api/projects', (req, res) => {
 });
 
 app.post('/api/projects', (req, res) => {
-  const { name, description } = req.body;
-  if (!name) {
-    return res.status(400).json({ error: 'Missing project name' });
-  }
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['name', 'description']));
+  const name = validateText(req.body.name, 'name', { required: true, max: 120 });
+  const description = validateText(req.body.description, 'description', { max: 10000 }) || '';
 
   const projectName = sanitizeName(name);
   if (!projectName || !isSafeObjectKey(projectName)) {
     return res.status(400).json({ error: 'Invalid project name' });
   }
-  if (projectName.length > 120) {
-    return res.status(400).json({ error: 'Project name is too long (max 120 characters)' });
-  }
-
   const data = readData();
   if (!data.projects) {
     data.projects = {};
@@ -853,7 +701,7 @@ app.post('/api/projects', (req, res) => {
   }
 
   const projectData = {
-    description: description || '',
+    description,
     stories: [],
     timeline: [],
     transcripts: []
@@ -865,10 +713,10 @@ app.post('/api/projects', (req, res) => {
 });
 
 app.put('/api/project', (req, res) => {
-  const { name, description } = req.body;
-  if (!name) {
-    return res.status(400).json({ error: 'Missing project name' });
-  }
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['name', 'description']));
+  const name = validateText(req.body.name, 'name', { required: true, max: 120 });
+  const description = validateText(req.body.description, 'description', { max: 10000 });
   const data = readData();
   const projectData = getProject(data, name);
   if (!projectData) {
@@ -889,11 +737,10 @@ app.delete('/api/project', (req, res) => {
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
-  // Clean up uploaded transcript files before dropping the project.
-  (projectData.transcripts || []).forEach(deleteTranscriptFile);
+  const filePaths = (projectData.transcripts || []).map(transcript => transcriptDiskPath(transcript, transcriptsDir)).filter(Boolean);
   delete data.projects[name];
-  writeData(data);
-  res.json({ success: true });
+  const cleanupWarnings = commitFileDeletions(filePaths, () => writeData(data));
+  res.json({ success: true, warnings: cleanupWarnings });
 });
 
 app.get('/api/project', (req, res) => {
@@ -918,14 +765,15 @@ app.get('/api/ai/prompts', (req, res) => {
 });
 
 app.put('/api/ai/prompts', (req, res) => {
-  const { dsuExtraction, statusReport } = req.body;
-  if (dsuExtraction === undefined && statusReport === undefined) {
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['statusReport']));
+  const statusReport = validateText(req.body.statusReport, 'statusReport', { max: 50000 });
+  if (statusReport === undefined) {
     return res.status(400).json({ error: 'Missing prompt updates' });
   }
 
   const data = readData();
   const prompts = getAiPrompts(data);
-  if (dsuExtraction !== undefined) prompts.dsuExtraction = dsuExtraction;
   if (statusReport !== undefined) prompts.statusReport = statusReport;
   data.aiPrompts = prompts;
   writeData(data);
@@ -944,6 +792,8 @@ app.get('/api/meta', (req, res) => {
 });
 
 app.put('/api/settings', (req, res) => {
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['commentStaleDays', 'sprintOptions']));
   const { commentStaleDays, sprintOptions } = req.body;
   if (commentStaleDays === undefined && sprintOptions === undefined) {
     return res.status(400).json({ error: 'Missing settings updates' });
@@ -951,27 +801,23 @@ app.put('/api/settings', (req, res) => {
   const data = readData();
   if (!data.settings) data.settings = {};
   if (commentStaleDays !== undefined) {
-    const n = parseInt(commentStaleDays, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 365) {
+    if (!Number.isInteger(commentStaleDays) || commentStaleDays < 1 || commentStaleDays > 365) {
       return res.status(400).json({ error: 'commentStaleDays must be a number between 1 and 365' });
     }
-    data.settings.commentStaleDays = n;
+    data.settings.commentStaleDays = commentStaleDays;
   }
   if (sprintOptions !== undefined) {
-    const nextOptions = Array.isArray(sprintOptions)
-      ? sprintOptions
-      : String(sprintOptions || '').split('\n');
-    data.settings.sprintOptions = nextOptions.map(value => String(value || '').trim()).filter(Boolean);
+    data.settings.sprintOptions = validateTextList(sprintOptions, 'sprintOptions', { maxItems: 200, maxItem: 200 });
   }
   writeData(data);
   res.json(getSettings(data));
 });
 
 app.post('/api/project/status-report', wrap(async (req, res) => {
-  const { project, mode = 'heuristic' } = req.body;
-  if (!project) {
-    return res.status(400).json({ error: 'Missing project name' });
-  }
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['project', 'mode']));
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const mode = validateText(req.body.mode, 'mode', { max: 20 }) || 'heuristic';
   if (!['heuristic', 'ai'].includes(mode)) {
     return res.status(400).json({ error: 'Invalid status summary mode' });
   }
@@ -982,13 +828,11 @@ app.post('/api/project/status-report', wrap(async (req, res) => {
     return res.status(404).json({ error: 'Project not found' });
   }
 
-  const prompts = getAiPrompts(data);
   const settings = getSettings(data);
+  const prompts = getAiPrompts(data);
   let report = '';
   let source = 'heuristic';
-
-  const timelineList = renderTimelineListForPrompt(projectData);
-  const transcriptList = renderTranscriptListForPrompt(projectData);
+  let warning = '';
 
   if (mode === 'heuristic') {
     report = generateHeuristicStatusReport(projectData, project, settings);
@@ -996,61 +840,67 @@ app.post('/api/project/status-report', wrap(async (req, res) => {
     if (!getProvider()) {
       return res.status(400).json({ error: 'AI drafting is not configured. Add a provider key in web/.env and restart the app.' });
     }
-    const prompt = renderPrompt(prompts.statusReport, {
-      projectName: project,
-      timelineList,
-      storyList: renderStoryListForReport(projectData),
-      transcriptList
-    }) + '\n\nAdditional guardrails: do not use vague group claims. State current Jira status and recorded update separately if they differ.';
-    report = await callLlm(prompt);
-    source = 'ai-draft';
-    if (!report || !report.trim()) {
-      throw new Error('Empty report from AI');
+    const heuristicReport = generateHeuristicStatusReport(projectData, project, settings);
+    const statusByStoryId = Object.fromEntries((projectData.stories || []).map(story => [story.id, inferStoryStatus(story)]));
+    const records = buildEvidenceRecords(projectData, { statusByStoryId });
+    const operatorGuidance = String(prompts.statusReport || '').replace(/\{\{\w+\}\}/g, '').slice(0, 4000);
+    const selection = await selectGroundedClaims({
+      callProvider: callLlm,
+      task: `Select the most important recorded evidence for this project status summary. ${operatorGuidance}`,
+      records,
+      maxClaims: 12
+    });
+    if (selection.source === 'ai-grounded') {
+      report = `${heuristicReport}\n\n${formatGroundedEvidence(selection.claims)}`;
+      source = selection.source;
+    } else {
+      console.warn('Grounded AI status selection rejected; using deterministic fallback:', selection.error);
+      report = heuristicReport;
+      source = selection.source;
+      warning = 'The AI output could not be verified against saved sources, so the deterministic grounded summary was used.';
     }
   }
 
-  res.json({ report, source });
+  res.json({ report, source, warning });
 }));
 
 app.post('/api/project/story', (req, res) => {
-  const { project, summary, description, acceptanceCriteria, dependencies, labels, environment, notes,
-    tracked, jiraId, owner, assignee, sprint, contacted, commentAdded, lastUpdate, lastComment, lastUpdateNotes } = req.body;
-  const timelineId = req.body.timelineId || '';
-  if (!project || !summary) {
-    return res.status(400).json({ error: 'Missing project or summary' });
-  }
+  plainObject(req.body);
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
 
   const data = readData();
   const projectData = getProject(data, project);
   if (!projectData) {
     return res.status(404).json({ error: 'Project not found' });
   }
+  const input = validateStoryCreate(req.body, projectData);
+  const lastCommentValue = input.lastComment !== undefined ? input.lastComment : (input.lastUpdate || '');
 
   const story = {
     id: createPersistentId('story'),
-    summary,
-    description: description || '',
-    acceptanceCriteria: Array.isArray(acceptanceCriteria) ? acceptanceCriteria : (acceptanceCriteria ? acceptanceCriteria.split('\n').map(item => item.trim()).filter(Boolean) : []),
-    dependencies: dependencies || '',
-    labels: Array.isArray(labels) ? labels : (labels ? labels.split(',').map(item => item.trim()).filter(Boolean) : []),
-    environment: environment || '',
-    notes: notes || '',
-    timelineId: timelineId || '',
+    summary: input.summary,
+    description: input.description || '',
+    acceptanceCriteria: input.acceptanceCriteria || [],
+    dependencies: input.dependencies || '',
+    labels: input.labels || [],
+    environment: input.environment || '',
+    notes: input.notes || '',
+    timelineId: input.timelineId || '',
     createdAt: new Date().toISOString(),
     updates: [],
     // Unified item: a story may also be "tracked" (the follow-up/Jira chase list). These
     // fields are the former Ticket fields; absent/false when the item isn't tracked.
-    tracked: !!tracked,
-    jiraId: jiraId || '',
-    assignee: assignee !== undefined ? assignee || '' : owner || '',
-    owner: assignee !== undefined ? assignee || '' : owner || '',
-    sprint: sprint || '',
-    contacted: !!contacted,
-    commentAdded: !!commentAdded,
-    lastCommentedAt: commentAdded ? new Date().toISOString() : null,
-    lastComment: lastComment !== undefined ? lastComment || '' : lastUpdate || '',
-    lastUpdate: lastComment !== undefined ? lastComment || '' : lastUpdate || '',
-    lastUpdateNotes: lastUpdateNotes || ''
+    tracked: input.tracked || false,
+    jiraId: input.jiraId || '',
+    assignee: input.assignee !== undefined ? input.assignee : (input.owner || ''),
+    owner: input.assignee !== undefined ? input.assignee : (input.owner || ''),
+    sprint: input.sprint || '',
+    contacted: input.contacted || false,
+    commentAdded: input.commentAdded || false,
+    lastCommentedAt: input.lastCommentedAt !== undefined ? input.lastCommentedAt : (input.commentAdded ? new Date().toISOString() : null),
+    lastComment: lastCommentValue,
+    lastUpdate: '',
+    lastUpdateNotes: input.lastUpdateNotes || ''
   };
 
   projectData.stories.unshift(story);
@@ -1076,8 +926,11 @@ app.post('/api/project/story/import/preview', wrap(async (req, res) => {
 }));
 
 app.post('/api/project/story/import', (req, res) => {
-  const { project, items } = req.body;
-  if (!project || !Array.isArray(items)) return res.status(400).json({ error: 'Missing project or imported work items' });
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['project', 'items']));
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const { items } = req.body;
+  if (!Array.isArray(items)) return res.status(400).json({ error: 'Missing project or imported work items' });
   if (items.length > 1000) return res.status(400).json({ error: 'Import is limited to 1,000 work items at a time' });
   const data = readData();
   const projectData = getProject(data, project);
@@ -1087,38 +940,44 @@ app.post('/api/project/story/import', (req, res) => {
   const created = [];
   const skipped = [];
   items.forEach((item, index) => {
-    const summary = String(item.summary || '').trim();
-    const jiraId = String(item.jiraId || '').trim();
+    let input;
+    try {
+      input = validateStoryCreate(item, projectData);
+    } catch (error) {
+      skipped.push({ row: Number(item && item.sourceRow) || index + 1, reason: error.message || 'Invalid work item' });
+      return;
+    }
+    const summary = input.summary;
+    const jiraId = input.jiraId || '';
     const normalizedJiraId = normalizeText(jiraId);
-    if (!summary) { skipped.push({ row: item.sourceRow || index + 1, reason: 'Missing summary' }); return; }
     if (normalizedJiraId && existingJiraIds.has(normalizedJiraId)) {
-      skipped.push({ row: item.sourceRow || index + 1, reason: `Duplicate Jira key: ${jiraId}` });
+      skipped.push({ row: Number(item && item.sourceRow) || index + 1, reason: `Duplicate Jira key: ${jiraId}` });
       return;
     }
     if (normalizedJiraId) existingJiraIds.add(normalizedJiraId);
-    const lastCommentedAt = String(item.lastCommentedAt || '').trim();
+    const lastCommentedAt = input.lastCommentedAt || '';
     const story = {
       id: createPersistentId('story'),
       summary,
-      description: String(item.description || '').trim(),
-      acceptanceCriteria: Array.isArray(item.acceptanceCriteria) ? item.acceptanceCriteria.map(value => String(value || '').trim()).filter(Boolean) : [],
-      dependencies: String(item.dependencies || '').trim(),
-      labels: Array.isArray(item.labels) ? item.labels.map(value => String(value || '').trim()).filter(Boolean) : [],
-      environment: String(item.environment || '').trim(),
+      description: input.description || '',
+      acceptanceCriteria: input.acceptanceCriteria || [],
+      dependencies: input.dependencies || '',
+      labels: input.labels || [],
+      environment: input.environment || '',
       notes: 'Imported from CSV',
       timelineId: '',
       createdAt: new Date().toISOString(),
       updates: [],
       tracked: false,
       jiraId,
-      assignee: resolveProjectAssignee(projectData, item.assignee),
-      owner: resolveProjectAssignee(projectData, item.assignee),
-      sprint: String(item.sprint || '').trim(),
+      assignee: resolveProjectAssignee(projectData, input.assignee),
+      owner: resolveProjectAssignee(projectData, input.assignee),
+      sprint: input.sprint || '',
       contacted: false,
       commentAdded: !!lastCommentedAt,
       lastCommentedAt: lastCommentedAt || null,
-      lastComment: String(item.lastComment || '').trim(),
-      lastUpdate: String(item.lastComment || '').trim(),
+      lastComment: input.lastComment || '',
+      lastUpdate: '',
       lastUpdateNotes: ''
     };
     projectData.stories.unshift(story);
@@ -1129,16 +988,22 @@ app.post('/api/project/story/import', (req, res) => {
 });
 
 app.put('/api/project/assignee-directory', (req, res) => {
-  const { project, entries, applyExisting } = req.body;
-  if (!project || !Array.isArray(entries)) return res.status(400).json({ error: 'Missing project or assignee directory entries' });
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['project', 'entries', 'applyExisting']));
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const { entries } = req.body;
+  const applyExisting = validateBoolean(req.body.applyExisting, 'applyExisting') || false;
+  if (!Array.isArray(entries) || entries.length > 500) return res.status(400).json({ error: 'Missing or excessive assignee directory entries' });
   const data = readData();
   const projectData = getProject(data, project);
   if (!projectData) return res.status(404).json({ error: 'Project not found' });
 
   const directory = {};
-  entries.forEach(entry => {
-    const alias = normalizeText(entry && entry.alias);
-    const name = String(entry && entry.name || '').trim();
+  entries.forEach((entry, index) => {
+    plainObject(entry, `entries[${index}]`);
+    rejectUnknownFields(entry, new Set(['alias', 'name']), `entries[${index}]`);
+    const alias = normalizeText(validateText(entry.alias, `entries[${index}].alias`, { required: true, max: 200 }));
+    const name = validateText(entry.name, `entries[${index}].name`, { required: true, max: 200 });
     if (alias && name) directory[alias] = name;
   });
   projectData.assigneeDirectory = directory;
@@ -1160,17 +1025,24 @@ app.put('/api/project/assignee-directory', (req, res) => {
 });
 
 app.put('/api/project/status-mappings', (req, res) => {
-  const { project, entries, applyExisting } = req.body;
-  if (!project || !Array.isArray(entries)) return res.status(400).json({ error: 'Missing project or status mappings' });
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['project', 'entries', 'applyExisting']));
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const { entries } = req.body;
+  const applyExisting = validateBoolean(req.body.applyExisting, 'applyExisting') || false;
+  if (!Array.isArray(entries) || entries.length > 500) return res.status(400).json({ error: 'Missing or excessive status mappings' });
   const data = readData();
   const projectData = getProject(data, project);
   if (!projectData) return res.status(404).json({ error: 'Project not found' });
 
   const mappings = {};
-  entries.forEach(entry => {
-    const jiraStatus = statusMappingKey(entry && entry.jiraStatus);
-    const operatingStatus = String(entry && entry.operatingStatus || '').trim();
+  entries.forEach((entry, index) => {
+    plainObject(entry, `entries[${index}]`);
+    rejectUnknownFields(entry, new Set(['jiraStatus', 'operatingStatus']), `entries[${index}]`);
+    const jiraStatus = statusMappingKey(validateText(entry.jiraStatus, `entries[${index}].jiraStatus`, { required: true, max: 200 }));
+    const operatingStatus = validateText(entry.operatingStatus, `entries[${index}].operatingStatus`, { required: true, max: 30 });
     if (jiraStatus && operatingStatuses.has(operatingStatus)) mappings[jiraStatus] = operatingStatus;
+    else throw new ValidationError(`entries[${index}].operatingStatus is not supported.`);
   });
   projectData.statusMappings = mappings;
 
@@ -1193,10 +1065,9 @@ app.put('/api/project/status-mappings', (req, res) => {
 });
 
 app.post('/api/project/timeline', (req, res) => {
-  const { project, title, date, status, notes } = req.body;
-  if (!project || !title) {
-    return res.status(400).json({ error: 'Missing project or title' });
-  }
+  plainObject(req.body);
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const input = validateTimelineCreate(req.body);
 
   const data = readData();
   const projectData = getProject(data, project);
@@ -1206,10 +1077,10 @@ app.post('/api/project/timeline', (req, res) => {
 
   const entry = {
     id: createPersistentId('timeline'),
-    title,
-    date: date || new Date().toISOString().slice(0, 10),
-    status: status || 'Planned',
-    notes: notes || ''
+    title: input.title,
+    date: input.date || localDateKey(),
+    status: input.status || 'Planned',
+    notes: input.notes || ''
   };
 
   projectData.timeline.unshift(entry);
@@ -1218,10 +1089,11 @@ app.post('/api/project/timeline', (req, res) => {
 });
 
 app.put('/api/project/story/link', (req, res) => {
-  const { project, storyId, timelineId } = req.body;
-  if (!project || !storyId || !timelineId) {
-    return res.status(400).json({ error: 'Missing project, storyId, or timelineId' });
-  }
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['project', 'storyId', 'timelineId']));
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const storyId = validateText(req.body.storyId, 'storyId', { required: true, max: 200 });
+  const timelineId = validateText(req.body.timelineId, 'timelineId', { required: true, max: 200 });
 
   const data = readData();
   const projectData = getProject(data, project);
@@ -1245,11 +1117,9 @@ app.put('/api/project/story/link', (req, res) => {
 });
 
 app.put('/api/project/story', (req, res) => {
-  const { project, id, title, summary, description, acceptanceCriteria, dependencies, labels, environment, notes, timelineId,
-    tracked, jiraId, owner, assignee, sprint, contacted, commentAdded, lastUpdate, lastComment, lastUpdateNotes, logComment, lastCommentedAt } = req.body;
-  if (!project || !id) {
-    return res.status(400).json({ error: 'Missing project or story id' });
-  }
+  plainObject(req.body);
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const id = validateText(req.body.id, 'id', { required: true, max: 200 });
 
   const data = readData();
   const projectData = getProject(data, project);
@@ -1261,60 +1131,51 @@ app.put('/api/project/story', (req, res) => {
   if (!story) {
     return res.status(404).json({ error: 'Story not found' });
   }
+  const input = validateStoryUpdate(req.body, projectData);
 
-  if (summary !== undefined) story.summary = summary;
-  if (title !== undefined) story.summary = title; // the Manage tab edits via `title`
-  if (description !== undefined) story.description = description;
-  if (acceptanceCriteria !== undefined) {
-    story.acceptanceCriteria = Array.isArray(acceptanceCriteria)
-      ? acceptanceCriteria
-      : String(acceptanceCriteria).split('\n').map(s => s.trim()).filter(Boolean);
-  }
-  if (dependencies !== undefined) story.dependencies = dependencies;
-  if (Array.isArray(labels)) story.labels = labels;
-  else if (typeof labels === 'string') story.labels = labels.split(',').map(s => s.trim()).filter(Boolean);
-  if (environment !== undefined) story.environment = environment;
-  if (notes !== undefined) story.notes = notes;
-  if (timelineId !== undefined) story.timelineId = timelineId; // '' unlinks from timeline
+  if (input.summary !== undefined) story.summary = input.summary;
+  if (input.title !== undefined) story.summary = input.title;
+  if (input.description !== undefined) story.description = input.description;
+  if (input.acceptanceCriteria !== undefined) story.acceptanceCriteria = input.acceptanceCriteria;
+  if (input.dependencies !== undefined) story.dependencies = input.dependencies;
+  if (input.labels !== undefined) story.labels = input.labels;
+  if (input.environment !== undefined) story.environment = input.environment;
+  if (input.notes !== undefined) story.notes = input.notes;
+  if (input.timelineId !== undefined) story.timelineId = input.timelineId;
 
   // --- Tracking (follow-up) fields — the former Ticket fields, now on the unified item ---
-  if (tracked !== undefined) story.tracked = !!tracked;
-  if (jiraId !== undefined) story.jiraId = jiraId;
-  if (assignee !== undefined) {
-    story.assignee = assignee;
-    story.owner = assignee;
-  } else if (owner !== undefined) {
-    story.owner = owner;
-    if (story.assignee === undefined) story.assignee = owner;
+  if (input.tracked !== undefined) story.tracked = input.tracked;
+  if (input.jiraId !== undefined) story.jiraId = input.jiraId;
+  if (input.assignee !== undefined) {
+    story.assignee = input.assignee;
+    story.owner = input.assignee;
+  } else if (input.owner !== undefined) {
+    story.owner = input.owner;
+    if (story.assignee === undefined) story.assignee = input.owner;
   }
-  if (sprint !== undefined) story.sprint = sprint;
-  if (contacted !== undefined) story.contacted = !!contacted;
-  if (commentAdded !== undefined) {
-    story.commentAdded = !!commentAdded;
-    if (commentAdded) story.lastCommentedAt = new Date().toISOString();
+  if (input.sprint !== undefined) story.sprint = input.sprint;
+  if (input.contacted !== undefined) story.contacted = input.contacted;
+  if (input.commentAdded !== undefined) {
+    story.commentAdded = input.commentAdded;
+    if (input.commentAdded) story.lastCommentedAt = new Date().toISOString();
   }
-  if (logComment) { // "✓ today" — (re)stamp the freshness clock; the recurring nudge reset
+  if (input.logComment) {
     story.lastCommentedAt = new Date().toISOString();
     story.commentAdded = true;
   }
-  if (lastCommentedAt !== undefined) story.lastCommentedAt = lastCommentedAt;
-  if (lastComment !== undefined) {
-    story.lastComment = lastComment;
-    story.lastUpdate = lastComment;
-  } else if (lastUpdate !== undefined) {
-    story.lastUpdate = lastUpdate;
-    if (story.lastComment === undefined) story.lastComment = lastUpdate;
-  }
-  if (lastUpdateNotes !== undefined) story.lastUpdateNotes = lastUpdateNotes;
+  if (input.lastCommentedAt !== undefined) story.lastCommentedAt = input.lastCommentedAt;
+  if (input.lastComment !== undefined) story.lastComment = input.lastComment;
+  else if (input.lastUpdate !== undefined) story.lastComment = input.lastUpdate;
+  if (input.lastUpdateNotes !== undefined) story.lastUpdateNotes = input.lastUpdateNotes;
   writeData(data);
   res.json(story);
 });
 
 app.put('/api/project/timeline', (req, res) => {
-  const { project, id, title, date, status, notes } = req.body;
-  if (!project || !id) {
-    return res.status(400).json({ error: 'Missing project or timeline id' });
-  }
+  plainObject(req.body);
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const id = validateText(req.body.id, 'id', { required: true, max: 200 });
+  const input = validateTimelineUpdate(req.body);
 
   const data = readData();
   const projectData = getProject(data, project);
@@ -1327,19 +1188,19 @@ app.put('/api/project/timeline', (req, res) => {
     return res.status(404).json({ error: 'Timeline entry not found' });
   }
 
-  if (title !== undefined) entry.title = title;
-  if (date !== undefined) entry.date = date;
-  if (status !== undefined) entry.status = status;
-  if (notes !== undefined) entry.notes = notes;
+  if (input.title !== undefined) entry.title = input.title;
+  if (input.date !== undefined) entry.date = input.date;
+  if (input.status !== undefined) entry.status = input.status;
+  if (input.notes !== undefined) entry.notes = input.notes;
   writeData(data);
   res.json(entry);
 });
 
 app.put('/api/project/transcript', (req, res) => {
-  const { project, id, title, notes, date, type } = req.body;
-  if (!project || !id) {
-    return res.status(400).json({ error: 'Missing project or transcript id' });
-  }
+  plainObject(req.body);
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const id = validateText(req.body.id, 'id', { required: true, max: 200 });
+  const input = validateTranscriptUpdate(req.body);
 
   const data = readData();
   const projectData = getProject(data, project);
@@ -1352,10 +1213,10 @@ app.put('/api/project/transcript', (req, res) => {
     return res.status(404).json({ error: 'Transcript not found' });
   }
 
-  if (title !== undefined) transcript.title = title;
-  if (notes !== undefined) transcript.notes = notes;
-  if (date !== undefined) transcript.date = date;
-  if (type !== undefined) transcript.type = type;
+  if (input.title !== undefined) transcript.title = input.title;
+  if (input.notes !== undefined) transcript.notes = input.notes;
+  if (input.date !== undefined) transcript.date = input.date;
+  if (input.type !== undefined) transcript.type = input.type;
   writeData(data);
   res.json(transcript);
 });
@@ -1396,11 +1257,8 @@ app.delete('/api/project/timeline', (req, res) => {
 });
 
 app.delete('/api/project/transcript', (req, res) => {
-  const project = req.query.project;
-  const id = req.query.id;
-  if (!project || !id) {
-    return res.status(400).json({ error: 'Missing project or transcript id' });
-  }
+  const project = validateText(req.query.project, 'project', { required: true, max: 120 });
+  const id = validateText(req.query.id, 'id', { required: true, max: 200 });
   const data = readData();
   const projectData = getProject(data, project);
   if (!projectData) {
@@ -1408,15 +1266,10 @@ app.delete('/api/project/transcript', (req, res) => {
   }
   const transcript = projectData.transcripts.find(t => t.id === id);
   projectData.transcripts = projectData.transcripts.filter(t => t.id !== id);
-  if (transcript) {
-    deleteTranscriptFile(transcript);
-    // Drop updates that were extracted from this transcript (no orphaned updates).
-    projectData.stories.forEach(s => {
-      if (Array.isArray(s.updates)) s.updates = s.updates.filter(u => u.transcriptId !== id);
-    });
-  }
-  writeData(data);
-  res.json({ success: true });
+  if (transcript) removeTranscriptEvidence(projectData, id);
+  const diskPath = transcriptDiskPath(transcript, transcriptsDir);
+  const cleanupWarnings = commitFileDeletions(diskPath ? [diskPath] : [], () => writeData(data));
+  res.json({ success: true, warnings: cleanupWarnings });
 });
 
 app.delete('/api/project/story/update', (req, res) => {
@@ -1433,20 +1286,24 @@ app.delete('/api/project/story/update', (req, res) => {
   if (!story) {
     return res.status(404).json({ error: 'Story not found' });
   }
-  story.updates = (story.updates || []).filter(u => u.id !== updateId);
+  removeStoryUpdate(story, updateId);
   writeData(data);
   res.json({ success: true });
 });
 
 app.post('/api/project/transcript', uploadRateLimit, wrap(async (req, res) => {
   const { fields, files: uploadedFiles } = await parseMultipart(req, { maxFiles: 5, allowedFields: ['project', 'notes', 'date', 'metadata', 'type', 'title'] });
-  const project = fields.project;
-  const notes = fields.notes || '';
-  const date = fields.date || '';
-
-  if (!project) {
-    return res.status(400).json({ error: 'Missing project name' });
-  }
+  const project = validateText(fields.project, 'project', { required: true, max: 120 });
+  let metadata;
+  try { metadata = JSON.parse(fields.metadata || '[]'); }
+  catch (_) { throw new ValidationError('Upload details could not be read.'); }
+  const uploadInput = validateTranscriptUpload({
+    notes: fields.notes || '',
+    date: fields.date || '',
+    title: fields.title || '',
+    type: fields.type || 'Notes',
+    metadata
+  });
 
   const data = readData();
   const projectData = getProject(data, project);
@@ -1454,57 +1311,57 @@ app.post('/api/project/transcript', uploadRateLimit, wrap(async (req, res) => {
     return res.status(404).json({ error: 'Project not found' });
   }
 
-  if (!uploadedFiles.length && !notes.trim()) return res.status(400).json({ error: 'Choose at least one file or add meeting notes' });
+  if (!uploadedFiles.length && !uploadInput.notes) return res.status(400).json({ error: 'Choose at least one file or add meeting notes' });
 
-  let metadata = [];
-  try { metadata = JSON.parse(fields.metadata || '[]'); } catch (_) { return res.status(400).json({ error: 'Upload details could not be read' }); }
-  const files = uploadedFiles.map(persistUpload);
-  const validTypes = new Set(['DSU', 'Meeting', 'Interview', 'Call', 'Notes', 'Other']);
+  const files = stageUploadFiles(uploadedFiles, transcriptsDir);
   const transcripts = [];
   const warnings = [];
-  const total = Math.max(files.length, 1);
-  for (let index = 0; index < total; index += 1) {
-    const file = files[index];
-    const details = metadata[index] || {};
-    const type = validTypes.has(details.type) ? details.type : (fields.type || 'Notes');
-    const isTextFile = !file || file.mimetype.startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(file.originalname);
-    const transcript = {
-      id: createPersistentId('transcript'),
-      title: String(details.title || (file && file.originalname) || fields.title || 'Meeting note').trim(),
-      file: file ? `/uploads/transcripts/${file.filename}` : '',
-      originalName: file ? file.originalname : '',
-      notes,
-      date: date || '',
-      type,
-      sourceKind: isTextFile ? 'text' : 'reference',
-      extractionNote: !isTextFile ? 'Reference only: this file type is saved but is not read for DSU extraction.' : '',
-      uploadedAt: new Date().toISOString()
-    };
-    projectData.transcripts.unshift(transcript);
+  try {
+    const total = Math.max(files.length, 1);
+    for (let index = 0; index < total; index += 1) {
+      const file = files[index];
+      const details = uploadInput.metadata[index] || { title: '', type: uploadInput.type };
+      const type = details.type || uploadInput.type;
+      const isTextFile = !file || String(file.mimetype || '').startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(file.originalname || '');
+      const transcript = {
+        id: createPersistentId('transcript'),
+        title: details.title || (file && file.originalname) || uploadInput.title || 'Meeting note',
+        file: file ? `/uploads/transcripts/${file.filename}` : '',
+        originalName: file ? file.originalname : '',
+        notes: uploadInput.notes,
+        date: uploadInput.date,
+        type,
+        sourceKind: isTextFile ? 'text' : 'reference',
+        extractionNote: !isTextFile ? 'Reference only: this file type is saved but is not read for DSU extraction.' : '',
+        uploadedAt: new Date().toISOString()
+      };
+      projectData.transcripts.unshift(transcript);
 
-    let transcriptText = notes || '';
-    if (file && isTextFile) {
-      try { transcriptText += '\n' + fs.readFileSync(file.path, 'utf8'); }
-      catch (error) {
-        transcript.extractionNote = 'The file was saved, but its text could not be read for extraction.';
-        warnings.push(`${file.originalname}: text could not be read`);
-        console.warn('Unable to read transcript file for DSU extraction:', error.message);
+      let transcriptText = uploadInput.notes;
+      if (file && isTextFile) {
+        try { transcriptText += '\n' + fs.readFileSync(file.path, 'utf8'); }
+        catch (error) {
+          transcript.extractionNote = 'The file was saved, but its text could not be read for extraction.';
+          warnings.push(`${file.originalname}: text could not be read`);
+          console.warn('Unable to read transcript file for DSU extraction:', error.message);
+        }
       }
-    }
-    if (type === 'DSU' && isTextFile) {
-      // DSU evidence stays deterministic, even when a drafting provider is configured.
-      const extracted = extractDsuUpdates(projectData, transcript, transcriptText);
-      if (extracted.length) {
-        transcript.extractedUpdates = extracted;
-        attachUpdatesToStories(projectData, transcript, extracted);
+      if (type === 'DSU' && isTextFile) {
+        const extracted = extractDsuUpdates(projectData, transcript, transcriptText);
+        if (extracted.length) {
+          transcript.extractedUpdates = extracted;
+          attachUpdatesToStories(projectData, transcript, extracted);
+        }
+      } else if (type === 'DSU' && !isTextFile) {
+        warnings.push(`${file.originalname}: saved as reference only; no text extraction was run`);
       }
-    } else if (type === 'DSU' && !isTextFile) {
-      warnings.push(`${file.originalname}: saved as reference only; no text extraction was run`);
+      transcripts.push(transcript);
     }
-    transcripts.push(transcript);
+    commitStagedUploads(files, () => writeData(data));
+  } catch (error) {
+    rollbackStagedUploads(files);
+    throw error;
   }
-
-  writeData(data);
   res.json({ transcripts, warnings });
 }));
 
@@ -1534,22 +1391,16 @@ function generateTeamsTemplate(recipient, subject, items) {
   return lines.join('\n');
 }
 
-function validateTeamsAiDraft(message, items) {
-  const allowedJiraIds = new Set(items.map(item => String(item.jiraId || '').toUpperCase()).filter(Boolean));
-  const mentionedJiraIds = String(message || '').match(/\b[A-Z][A-Z0-9]+-\d+\b/g) || [];
-  const unsupported = [...new Set(mentionedJiraIds.map(id => id.toUpperCase()).filter(id => !allowedJiraIds.has(id)))];
-  if (unsupported.length) {
-    throw new Error(`AI draft referenced unselected Jira work item${unsupported.length === 1 ? '' : 's'}: ${unsupported.join(', ')}`);
-  }
-  return message;
-}
-
 app.post('/api/project/teams-update', wrap(async (req, res) => {
   // storyIds are the selected item ids; ticketIds accepted for backward-compat and merged.
-  const { project, recipient, subject, storyIds, ticketIds, mode = 'heuristic' } = req.body;
-  if (!project) {
-    return res.status(400).json({ error: 'Missing project name' });
-  }
+  plainObject(req.body);
+  rejectUnknownFields(req.body, new Set(['project', 'recipient', 'subject', 'storyIds', 'ticketIds', 'mode']));
+  const project = validateText(req.body.project, 'project', { required: true, max: 120 });
+  const recipient = validateText(req.body.recipient, 'recipient', { max: 500 }) || '';
+  const subject = validateText(req.body.subject, 'subject', { max: 1000 }) || '';
+  const mode = validateText(req.body.mode, 'mode', { max: 20 }) || 'heuristic';
+  const storyIds = validateTextList(req.body.storyIds, 'storyIds', { maxItems: 1000, maxItem: 200 }) || [];
+  const ticketIds = validateTextList(req.body.ticketIds, 'ticketIds', { maxItems: 1000, maxItem: 200 }) || [];
   if (!['heuristic', 'ai'].includes(mode)) {
     return res.status(400).json({ error: 'Invalid Teams draft mode' });
   }
@@ -1566,38 +1417,41 @@ app.post('/api/project/teams-update', wrap(async (req, res) => {
     return res.status(400).json({ error: 'Select at least one item' });
   }
 
-  const itemList = items.map(s => {
-    const recent = Array.isArray(s.updates) && s.updates[0] ? (s.updates[0].update || s.updates[0].excerpt || '') : '';
-    const parts = [];
-    if (s.jiraId) parts.push(`jira: ${s.jiraId}`);
-    parts.push(`status: ${inferStoryStatus(s)}`);
-    if (storyAssignee(s)) parts.push(`assignee: ${storyAssignee(s)}`);
-    if (storySprint(s)) parts.push(`sprint: ${storySprint(s)}`);
-    if (s.notes) parts.push(`notes: ${s.notes}`);
-    if (recent) parts.push(`recent: ${recent}`);
-    else if (storyLastCommentText(s)) parts.push(`last comment: ${storyLastCommentText(s)}`);
-    return `- ${s.summary} | ${parts.join(' | ')}`;
-  }).join('\n') || '(none)';
-
   let message = '';
   let source = 'heuristic';
+  let warning = '';
   if (mode === 'heuristic') {
     message = generateTeamsTemplate(recipient, subject, items);
   } else {
     if (!getProvider()) {
       return res.status(400).json({ error: 'AI drafting is not configured. Add a provider key in web/.env and restart the app.' });
     }
-    const prompt = renderPrompt(defaultTeamsUpdatePrompt, {
-      recipient: recipient || 'there',
-      subject: subject || '',
-      itemList
-    }) + '\n\nAdditional guardrails: use only selected Jira IDs. State each current Jira status. If an update sounds different from the status, write both without claiming the status changed.';
-    message = validateTeamsAiDraft(await callLlm(prompt), items);
-    source = 'ai-draft';
-    if (!message || !message.trim()) throw new Error('Empty message from AI');
+    const deterministicMessage = generateTeamsTemplate(recipient, subject, items);
+    const statusByStoryId = Object.fromEntries(items.map(story => [story.id, inferStoryStatus(story)]));
+    const records = buildEvidenceRecords(projectData, {
+      stories: items,
+      statusByStoryId,
+      includeTimeline: false,
+      includeTranscripts: false
+    });
+    const selection = await selectGroundedClaims({
+      callProvider: callLlm,
+      task: 'Select concise supporting evidence for a Microsoft Teams update about only the selected work items.',
+      records,
+      maxClaims: 8
+    });
+    if (selection.source === 'ai-grounded') {
+      message = `${deterministicMessage}\n\n${formatGroundedEvidence(selection.claims, 'AI-selected supporting evidence')}`;
+      source = selection.source;
+    } else {
+      console.warn('Grounded AI Teams selection rejected; using deterministic fallback:', selection.error);
+      message = deterministicMessage;
+      source = selection.source;
+      warning = 'The AI output could not be verified against the selected work items, so the deterministic draft was used.';
+    }
   }
 
-  res.json({ message, source });
+  res.json({ message, source, warning });
 }));
 
 // Return a clean JSON error instead of a stack trace / hung request — e.g. when
@@ -1607,6 +1461,7 @@ app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   if (err instanceof ProviderTimeoutError) return res.status(504).json({ error: err.message });
   if (err instanceof ProviderRequestError) return res.status(502).json({ error: err.message });
+  if (err instanceof ValidationError) return res.status(400).json({ error: err.message });
   if (/file type|multipart|uploaded file|upload up to|uploads are limited|too many upload fields|upload field/i.test(err && err.message)) return res.status(400).json({ error: err.message });
   res.status(500).json({ error: 'The request could not be completed. Check the local server log for details.' });
 });

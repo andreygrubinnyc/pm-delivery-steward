@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## 1.0.2 - 2026-07-15
+
+- Required DSU matches to identify a work item within the same evidence segment, preventing unrelated sentences from being saved as a work-item update.
+- Replaced substring-based status inference with exact canonical matching so values such as `incomplete`, `not done`, and `unresolved` are not treated as complete.
+- Treated materially future comment timestamps as invalid freshness evidence so imports cannot suppress stale-comment warnings.
+- Reworked optional AI report and Teams flows around structured untrusted inputs, JSON-only exact source citations, server-side claim validation, and deterministic fallback.
+- Removed the retired free-form AI extraction path so DSU extraction cannot accidentally bypass deterministic evidence matching.
+- Made upload and delete operations rollback-safe across JSON and stored files, with startup recovery for interrupted deletes and cleanup for incomplete uploads.
+- Preserved every DSU source reference during deduplication and recalculated derived evidence dates whenever a source or update is deleted.
+- Treated date-only values as local calendar dates for milestone health, form defaults, sorting, and display.
+- Added explicit request schemas, field-size limits, controlled status/type values, and milestone-reference checks for persisted records.
+- Fixed canonical project selection, Workspace Data Story editing, Follow-Up badge routing, mutation error handling, and safe download links for reference files.
+- Escaped Settings search values and raw HTML in Markdown exports.
+- Added regression coverage for evidence integrity, storage rollback/recovery, date-only behavior, request validation, UI/API contracts, artifact injection, and prompt-injection payloads.
+
 ## 1.0.1 - 2026-07-14
 
 - Replaced timestamp-based persistent identifiers with UUIDs to prevent concurrent create collisions.
