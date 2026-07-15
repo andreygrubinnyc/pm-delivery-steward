@@ -17,8 +17,8 @@ jobs:
     name: Analyze JavaScript
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: github/codeql-action/init@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: github/codeql-action/init@1ad29ea4a422cce9a242a9fae469541dcd08addc # v4
         with:
           languages: javascript-typescript
-      - uses: github/codeql-action/analyze@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
+      - uses: github/codeql-action/analyze@1ad29ea4a422cce9a242a9fae469541dcd08addc # v4
