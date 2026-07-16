@@ -13,6 +13,7 @@
     return String(value == null ? '' : value)
       .replace(/\\/g, '\\\\')
       .replace(/\|/g, '\\|')
+      .replace(/([\[\]!`*_{}#~])/g, '\\$1')
       .replace(/[\r\n]+/g, ' ')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')

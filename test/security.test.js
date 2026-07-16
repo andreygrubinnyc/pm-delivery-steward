@@ -22,6 +22,9 @@ test('CSV cells neutralize spreadsheet formula prefixes', () => {
 
 test('Markdown table cells escape backslashes, pipes, and line breaks', () => {
   assert.equal(markdownCell('a\\|b\r\nc'), 'a\\\\\\|b c');
+  assert.equal(markdownCell('ordinary value'), 'ordinary value');
+  assert.equal(markdownCell('[run](javascript:alert(1))'), '\\[run\\](javascript:alert(1))');
+  assert.equal(markdownCell('![remote](https://attacker.example/pixel)'), '\\!\\[remote\\](https://attacker.example/pixel)');
 });
 
 test('same-origin browser mutations and local non-browser clients remain allowed', () => {

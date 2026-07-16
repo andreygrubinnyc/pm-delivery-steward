@@ -52,6 +52,22 @@ test('AI claims must cite an existing source and quote its recorded text', () =>
   }]);
 });
 
+test('AI claims must preserve a complete source sentence or field value', () => {
+  const records = [{ sourceId: 'story:story-1:status', text: 'The release is not complete. Rehearsal remains scheduled.' }];
+  assert.throws(() => validateGroundedClaims(
+    JSON.stringify({ claims: [{ sourceId: records[0].sourceId, excerpt: 'complete' }] }),
+    records
+  ), /complete source sentence or field value/i);
+  assert.throws(() => validateGroundedClaims(
+    JSON.stringify({ claims: [{ sourceId: records[0].sourceId, excerpt: 'The release is not complete' }] }),
+    records
+  ), /complete source sentence or field value/i);
+  assert.deepEqual(validateGroundedClaims(
+    JSON.stringify({ claims: [{ sourceId: records[0].sourceId, excerpt: 'The release is not complete.' }] }),
+    records
+  ), [{ sourceId: records[0].sourceId, excerpt: 'The release is not complete.' }]);
+});
+
 test('AI output must use the bounded grounded-claims JSON schema', () => {
   const records = buildEvidenceRecords(projectData);
   assert.throws(() => validateGroundedClaims('The project is green.', records), /valid JSON/i);

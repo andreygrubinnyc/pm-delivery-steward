@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   attachUpdatesToStories,
+  refreshTranscriptEvidence,
   removeTranscriptEvidence,
   removeStoryUpdate,
   storyLastCommentText
@@ -43,4 +44,25 @@ test('manual update deletion recalculates lastUpdate and dates are not shown as 
   removeStoryUpdate(story, 'new');
   assert.equal(story.lastUpdate, '2026-07-13');
   assert.equal(storyLastCommentText(story), '');
+});
+
+test('transcript metadata edits refresh copied provenance and derived dates', () => {
+  const project = { stories: [{ id: 'story-1', updates: [] }] };
+  const transcript = { id: 'source-1', title: 'Original DSU', date: '2026-07-13' };
+  attachUpdatesToStories(project, transcript, [{ storyId: 'story-1', excerpt: 'PM-42 rehearsal completed.' }], {
+    createId: () => 'update-1'
+  });
+
+  transcript.title = 'Corrected DSU';
+  transcript.date = '2026-07-20';
+  refreshTranscriptEvidence(project, transcript);
+
+  const story = project.stories[0];
+  const update = story.updates[0];
+  assert.equal(update.sourceRefs[0].transcriptTitle, 'Corrected DSU');
+  assert.equal(update.sourceRefs[0].source, 'Corrected DSU');
+  assert.equal(update.sourceRefs[0].date, '2026-07-20');
+  assert.equal(update.transcriptTitle, 'Corrected DSU');
+  assert.equal(update.date, '2026-07-20');
+  assert.equal(story.lastUpdate, '2026-07-20');
 });
