@@ -10,7 +10,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check lib/runtime-security.js && node --check lib/delivery-integrity.js && node --check lib/evidence-integrity.js && node --check lib/grounded-ai.js && node --check lib/input-validation.js && node --check lib/storage-integrity.js && node --check public/security.js && node --check public/app.js",
+    "check": "node --check server.js && node --check lib/runtime-security.js && node --check lib/csv-import.js && node --check lib/delivery-integrity.js && node --check lib/evidence-integrity.js && node --check lib/grounded-ai.js && node --check lib/input-validation.js && node --check lib/storage-integrity.js && node --check public/security.js && node --check public/app.js",
     "test": "npm run check && node --test",
     "audit": "npm audit --omit=dev"
   },

@@ -19,8 +19,10 @@ const {
   getTrustedClaudeApiUrl
 } = require('./lib/runtime-security');
 const { extractDsuUpdates } = require('./lib/delivery-integrity');
+const { parseCsv } = require('./lib/csv-import');
 const {
   attachUpdatesToStories,
+  refreshTranscriptEvidence,
   removeTranscriptEvidence,
   removeStoryUpdate,
   storyLastCommentText
@@ -260,30 +262,6 @@ function applyOperatingStatusLabel(labels, operatingStatus) {
   return operatingStatus ? [...new Set([operatingStatus.toLowerCase(), ...next])] : next;
 }
 
-function parseCsv(text) {
-  const rows = [];
-  let row = [];
-  let cell = '';
-  let quoted = false;
-  const input = String(text || '').replace(/^\uFEFF/, '');
-  for (let index = 0; index < input.length; index += 1) {
-    const char = input[index];
-    if (quoted) {
-      if (char === '"' && input[index + 1] === '"') { cell += '"'; index += 1; }
-      else if (char === '"') quoted = false;
-      else cell += char;
-      continue;
-    }
-    if (char === '"') quoted = true;
-    else if (char === ',') { row.push(cell); cell = ''; }
-    else if (char === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
-    else if (char !== '\r') cell += char;
-  }
-  row.push(cell);
-  if (row.some(value => value.trim())) rows.push(row);
-  return rows;
-}
-
 function csvHeaderKey(value) {
   return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
@@ -421,7 +399,7 @@ async function callOpenAIApi(request) {
   const model = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
   const maxTokens = parseInt(process.env.OPENAI_MAX_TOKENS, 10) || 2000;
   const llmRequest = normalizeLlmRequest(request);
-  const response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
+  const { response, body: data } = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -436,11 +414,10 @@ async function callOpenAIApi(request) {
       temperature: 0.1,
       max_tokens: maxTokens
     })
+  }, {
+    consumeResponse: providerResponse => providerResponse.json(),
+    responseErrorMessage: 'OpenAI returned an unreadable response.'
   });
-
-  let data;
-  try { data = await response.json(); }
-  catch (_) { throw new ProviderRequestError('OpenAI returned an unreadable response.'); }
   if (!response.ok) {
     throw new ProviderRequestError(`OpenAI API error ${response.status}: ${data?.error?.message || 'unknown error'}`);
   }
@@ -453,7 +430,7 @@ async function callClaudeApi(request) {
 
   const apiUrl = getTrustedClaudeApiUrl();
   const llmRequest = normalizeLlmRequest(request);
-  const response = await fetchWithTimeout(apiUrl, {
+  const { response, body: data } = await fetchWithTimeout(apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -466,11 +443,10 @@ async function callClaudeApi(request) {
       system: llmRequest.system,
       messages: [{ role: 'user', content: llmRequest.user }]
     })
+  }, {
+    consumeResponse: providerResponse => providerResponse.json(),
+    responseErrorMessage: 'Claude returned an unreadable response.'
   });
-
-  let data;
-  try { data = await response.json(); }
-  catch (_) { throw new ProviderRequestError('Claude returned an unreadable response.'); }
   if (!response.ok) {
     throw new ProviderRequestError(`Claude API error ${response.status}: ${data?.error?.message || 'unknown error'}`);
   }
@@ -1217,6 +1193,7 @@ app.put('/api/project/transcript', (req, res) => {
   if (input.notes !== undefined) transcript.notes = input.notes;
   if (input.date !== undefined) transcript.date = input.date;
   if (input.type !== undefined) transcript.type = input.type;
+  refreshTranscriptEvidence(projectData, transcript);
   writeData(data);
   res.json(transcript);
 });

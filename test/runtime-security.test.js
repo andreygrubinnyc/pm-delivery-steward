@@ -24,7 +24,34 @@ test('provider requests are cancelled after their deadline', async () => {
     signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
   });
   await assert.rejects(
-    fetchWithTimeout('https://api.openai.com/v1/chat/completions', {}, { fetchImpl: neverResponds, timeoutMs: 5 }),
+    fetchWithTimeout('https://api.openai.com/v1/chat/completions', {}, {
+      fetchImpl: neverResponds,
+      timeoutMs: 5,
+      consumeResponse: response => response.json()
+    }),
     ProviderTimeoutError
   );
+});
+
+test('provider response bodies remain covered by the request deadline', async () => {
+  let requestSignal;
+  const headersThenStalls = async (_url, { signal }) => {
+    requestSignal = signal;
+    return {
+      ok: true,
+      status: 200,
+      json: () => new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      })
+    };
+  };
+  await assert.rejects(
+    fetchWithTimeout('https://api.openai.com/v1/chat/completions', {}, {
+      fetchImpl: headersThenStalls,
+      timeoutMs: 5,
+      consumeResponse: response => response.json()
+    }),
+    ProviderTimeoutError
+  );
+  assert.equal(requestSignal.aborted, true);
 });
